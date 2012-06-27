@@ -26,6 +26,8 @@ import subprocess
 import xml.dom.minidom
 import os
 import traceback
+import threading
+import signal
 
 try:
     from cStringIO import StringIO
@@ -34,6 +36,7 @@ except ImportError:
 
 class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     server_version = "fakeobs/" + __version__
+    protocol_version = 'HTTP/1.1'
 
     def do_GET(self):
         """Serve a GET request."""
@@ -94,7 +97,7 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         contentsize = 0
         contentmtime = 0
         contenttype = None
-                
+
         pathparsed = urlparse.urlparse(self.path)
         path = pathparsed[2] 
 
@@ -106,15 +109,10 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             query = {}
 
+        threading.current_thread().name = self.path
+
         if path.startswith("/public/lastevents"):
             if query.has_key("start"):
-                if int(query["start"][0]) == gitmer.get_next_event():
-                        # Normally OBS would block here, but we just 503 and claim we're busy, 
-                        # hoping it comes back
-                        self.send_response(503)
-                        self.end_headers()
-                        return None
-                
                 filters = []
                 
                 if query.has_key("filter"):
@@ -124,6 +122,15 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                             filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), None))
                         else:
                             filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), urllib.unquote(spl[2])))
+
+                if "obsname" in query:
+                    threading.current_thread().name = "%s Watcher" % query["obsname"][0]
+
+                print "%s: will poll every 10 seconds" % threading.current_thread().name
+
+                while int(query["start"][0]) == gitmer.get_next_event():
+                    time.sleep(10)
+
                 contentsize, content = string2stream(gitmer.get_events_filtered(int(query["start"][0]), filters))
                 contenttype = "text/html"
                 contentmtime = time.time()
@@ -191,12 +198,25 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         elif path.startswith("/public/build"):
             pathparts = path.split("/")
             pathparts = pathparts[1:]
-            print pathparts
+
             #/public/build/Mer:Trunk:Base/standard/i586/_repository?view=cache
             if len(pathparts) >= 3:
                 pathparts[2] = lookup_binariespath(pathparts[2])
                 if pathparts[2] is None:
                     pathparts[2] = "--UNKNOWNPROJECT"
+            if len(pathparts) == 6 and pathparts[5] != "_repository":
+                if not isinstance(query.get("binary", None), list):
+                    query["binary"] = []
+                query["binary"].append(pathparts[5])
+                    
+                if not isinstance(query.get("view", None), list):
+                    query["view"] = ["names"]
+
+                pathparts[5] = "_repository"
+
+            print pathparts
+            print query
+
             if len(pathparts) == 6 and pathparts[5] == "_repository":
                 # pathparts[2]  == project
                 #          [3]  == repository
@@ -225,7 +245,6 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     print binaries
 
                     cpiooutput = subprocess.Popen(["tools/createcpio", pathparts[2] + "/" + pathparts[3] + "/" + pathparts[4]], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
-#                    cpiooutput = subprocess.Popen(["/usr/bin/curl", "http://192.168.100.213:81/public/build/Core:i586/Core_i586/i586/_repository?" + pathparsed[4]], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate()[0]
                     contentsize, content = string2stream(cpiooutput)
                     print contentsize
                     contentmtime = time.time()
@@ -293,11 +312,45 @@ class SimpleHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         """
         shutil.copyfileobj(source, outputfile)
 
+
 class XFSPWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
-        pass
+    pass
 
-PORT = int(sys.argv[1])
 
-httpd = XFSPWebServer(("0.0.0.0", PORT), SimpleHTTPRequestHandler)
-httpd.serve_forever()
+def termhandler(signum, frame):
+    print 'Got a SIGTERM ...'
+    frame.f_locals["httpd"].shutdown()
 
+def sigusr1handler(signum, frame):
+    print 'Got a SIGUSR1 ...'
+    for t in threading.enumerate():
+        print t.name
+
+if __name__ == "__main__":
+
+    PORT = int(sys.argv[1])
+    httpd = XFSPWebServer(("0.0.0.0", PORT), SimpleHTTPRequestHandler)
+
+    try:
+        # Start a thread with the server -- that thread will then start one
+        # more thread for each request
+        server_thread = threading.Thread(target=httpd.serve_forever)
+
+        # Exit the server thread when the main thread terminates
+        server_thread.daemon = True
+        server_thread.name = "ServerThread"
+        server_thread.start()
+        
+        signal.signal(signal.SIGTERM, termhandler)
+        signal.signal(signal.SIGUSR1, sigusr1handler)
+
+        print "Server loop running in thread:", server_thread.name
+        while server_thread.is_alive():
+            time.sleep(2)
+
+    except KeyboardInterrupt:
+        print "Shutdown requested ..."
+        httpd.shutdown()
+
+    print "Shutdown complete."
+    sys.exit(0)
