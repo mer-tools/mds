@@ -1,20 +1,18 @@
 __version__ = "2.0"
 
 import os, sys
-#import posixpath
 import SocketServer
 import BaseHTTPServer
-#import urllib
-#import cgi
 import time
 import shutil
-#import mimetypes
 import urlparse
-#import uuid
+import urllib
 import gitmds2
-#import subprocess
-#import xml.dom.minidom
 import traceback
+import subprocess
+import threading
+import signal
+
 try:
     from lxml import etree
 except ImportError:
@@ -28,7 +26,74 @@ try:
 except ImportError:
     from StringIO import StringIO
 
-#
+# Handy helpers:
+#  This converts a string into a stream and returns the size and the content stream
+def string2stream(thestr):
+    content = StringIO()
+    content.write(thestr)
+    content.seek(0, os.SEEK_END)
+    contentsize = content.tell()
+    content.seek(0, os.SEEK_SET)
+    return contentsize, content
+
+def file2stream(path):
+    f = open(path, 'rb')
+    fs = os.fstat(f.fileno())
+    return fs[6], fs.st_mtime, f
+
+def copyfile(source, outputfile):
+    """Copy all data between two file objects.
+
+    The SOURCE argument is a file object open for reading
+    (or anything with a read() method) and the DESTINATION
+    argument is a file object open for writing (or
+    anything with a write() method).
+
+    The only reason for overriding this would be to change
+    the block size or perhaps to replace newlines by CRLF
+    -- note however that this the default server uses this
+    to copy binary data as well.
+
+    """
+    shutil.copyfileobj(source, outputfile)
+
+myLock = threading.Lock()
+
+def synchronized(lock):
+    """ Synchronization decorator. """
+
+    def wrap(f):
+        def newFunction(*args, **kw):
+            lock.acquire()
+            try:
+                return f(*args, **kw)
+            finally:
+                lock.release()
+        return newFunction
+    return wrap
+
+@synchronized(myLock)
+def get_mappings():
+    if not hasattr(get_mappings, "mcache"):
+        get_mappings.mcache = etree.parse("mappings.xml").getroot()
+        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
+    stat = os.stat("mappings.xml")
+    if get_mappings.mcachetime != stat.st_mtime:
+        print "mappings.xml was updated, reloading.."
+        get_mappings.mcache = etree.parse("mappings.xml").getroot()
+        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
+    return get_mappings.mcache
+
+def lookup_binariespath(projectname):
+    binaries_path = None
+    for x in get_mappings().iter("mapping"):
+        #if x.attrib["project"] == projectname:
+        binaries_path = os.path.join(x.attrib["binaries"], projectname)
+    if os.path.exists(binaries_path):
+        return binaries_path
+    else:
+        return None
+
 # MDSHTTPRequestHandler handles the incoming HTTP requests
 # The basic flow is that GET/POST/HEAD attempts to 
 # run the send_head command, and if that throws an exception,
@@ -38,6 +103,7 @@ except ImportError:
 
 class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     server_version = "mds/" + __version__
+    protocol_version = 'HTTP/1.1'
 
     def do_GET(self):
         """Serve a GET request."""
@@ -50,9 +116,9 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
         if f:
-            self.copyfile(f, self.wfile)
+            copyfile(f, self.wfile)
             if hasattr(f, "close"):
-               f.close()
+                f.close()
 
     def do_HEAD(self):
         """Serve a HEAD request."""
@@ -62,40 +128,33 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         except:
         
             if f:
-              if hasattr(f, "close"):
-                f.close()
+                if hasattr(f, "close"):
+                    f.close()
 
     def do_POST(self):
         f = None
         try:
-          f = self.send_head()
+            f = self.send_head()
         except:
-          self.send_response(500)
-          print "500: " + self.path
-          traceback.print_exc(file=sys.stdout)
-          self.end_headers()
+            self.send_response(500)
+            print "500: " + self.path
+            traceback.print_exc(file=sys.stdout)
+            self.end_headers()
         if f:
-          self.copyfile(f, self.wfile)
-          if hasattr(f, "close"):
-            f.close()             
-        
+            copyfile(f, self.wfile)
+            if hasattr(f, "close"):
+                f.close()
 
     def send_head(self):
         # OBS project names are always of this form:
         #    projectname:gitreference:subdir
-        
-        # Handy helper:
-        #  This converts a string into a stream and returns the size and the content stream
-        def string2stream(thestr):
-            content = StringIO()
-            content.write(thestr)
-            content.seek(0, os.SEEK_END)
-            contentsize = content.tell()
-            content.seek(0, os.SEEK_SET)
-            return contentsize, content
 
         # These are the four variables that must be set for a succesful request as it
         # is what is used to return content to the client, set headers, etc.        
+        # If after analyzing the request it is still None
+        # it means whatever was requested could not be found
+        threading.current_thread().name = self.path
+
         content = None
         contentsize = 0
         contentmtime = 0
@@ -107,127 +166,295 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         query = None
         
         if self.headers.getheader('Content-Length') is not None:
-           data = self.rfile.read(int(self.headers.getheader('Content-Length')))
-           query = urlparse.parse_qs(data)
+            data = self.rfile.read(int(self.headers.getheader('Content-Length')))
+            query = urlparse.parse_qs(data)
         elif urlparsed[4] is not None:
-           query = urlparse.parse_qs(urlparsed[4])
+            query = urlparse.parse_qs(urlparsed[4])
         else:
-           query = {}
-           
+            query = {}
+
+        urlsplit = urlpath.split("/")[3:]
         # Begin handling the requests
         # This handles OBS API /public/source/*
         if urlpath.startswith("/public/source/"):
-           urlpathsplit = urlpath.split("/") 
-           sourcesplit = urlpathsplit[3:]
-           
-           # Fetch the project description (packages, other meta data, etc) dictionary for the indicated project
-           project = gitmds2.get_project(sourcesplit[0])
-           if not project is None:
-              if len(sourcesplit) == 1:
-              # This handles:
-              # /public/source/PROJECTNAME
-              # - Basically build a XML output that states what packages are contained
-              #   within the project
-                 contentsize, content = string2stream(gitmds2.build_project_index(project))
-                 contenttype = "text/xml"
-                 contentmtime = time.time()
-              elif len(sourcesplit) == 2:
-              # /public/source/PROJECTNAME/_config
-              # /public/source/PROJECTNAME/_meta
-              # /public/source/PROJECTNAME/_pubkey
-              # /public/source/PROJECTNAME/_pattern
-              # /public/source/PROJECTNAME/PACKAGENAME
-                 # The project configuration, stored in our project dictionary
-                 if sourcesplit[1] == "_config":
-                    contentsize, content = string2stream(project["prjconf"])
-                    contenttype = "text/plain"
-                    contentmtime = time.time()
-                 # The project meta, stored in our project dictionary
-                 elif sourcesplit[1] == "_meta":
-                    contentsize, content = string2stream(etree.tostring(project["meta"], pretty_print=True))
-                    contenttype = "text/xml"
-                    contentmtime = time.time()
-                 elif sourcesplit[1] == "_pubkey":
-                 # We don't currently support extracting pubkeys
-                    content = None
-                 elif sourcesplit[1] == "_pattern":
-                 # We don't currently support extracting patterns
-                    content = None
-                 else:
-                    expand = 0
-                    rev = None
-                    # Determine if the remote OBS wants the expanded package
-                    # for the linked package (we don't really support this, we just
-                    # give packages different names)
-                    if query.has_key("expand"):
-                        expand = int(query["expand"][0])
-                    # Determine what revision is being asked for of the package
-                    if query.has_key("rev"):
-                        rev = query["rev"][0]
-                    
-                    # This will return a XML document containing the files of the package at the time of the revision
-                    contentsize, content = string2stream(gitmds2.get_package_index(project, sourcesplit[1], rev))
-                    contenttype = "text/xml"
-                    contentmtime = time.time()
-                 
-              elif len(sourcesplit) == 3:
-                rev = None
-                expand = 0
+            return self.handle_source(urlsplit, query)
+        # entry point for binary build result repos OBS API /public/build/*
+        elif urlpath.startswith("/public/build"):
+            return self.handle_build(urlsplit, query)
+        elif urlpath.startswith("/public/lastevents"):
+            return self.handle_lastevents(urlsplit, query)
+
+    def handle_source(self, sourcesplit, query):
+        content = None
+        # Fetch the project description (packages, other meta data, etc) dictionary for the indicated project
+        project = gitmds2.get_project(sourcesplit[0])
+        if not project:
+            print "404: %s" % os.path.join(sourcesplit)
+            self.send_error(404, "File not found")
+            return None
+
+        if len(sourcesplit) == 1:
+        # This handles:
+        # /public/source/PROJECTNAME
+        # - Basically build a XML output that states what packages are contained
+        #   within the project
+            contentsize, content = string2stream(gitmds2.build_project_index(project))
+            contenttype = "text/xml"
+            contentmtime = time.time()
+        elif len(sourcesplit) == 2:
+        # /public/source/PROJECTNAME/_config
+        # /public/source/PROJECTNAME/_meta
+        # /public/source/PROJECTNAME/_pubkey
+        # /public/source/PROJECTNAME/_pattern
+        # /public/source/PROJECTNAME/PACKAGENAME
+            # The project configuration, stored in our project dictionary
+            if sourcesplit[1] == "_config":
+                contentsize, content = string2stream(project["prjconf"])
+                contenttype = "text/plain"
+                contentmtime = time.time()
+            # The project meta, stored in our project dictionary
+            elif sourcesplit[1] == "_meta":
+                contentsize, content = string2stream(etree.tostring(project["meta"], pretty_print=True))
+                contenttype = "text/xml"
+                contentmtime = time.time()
+            #elif sourcesplit[1] == "_pubkey":
+            #FIXME: We don't currently support extracting pubkeys
+            #   content = None
+            #elif sourcesplit[1] == "_pattern":
+            #FIXME: We don't currently support extracting patterns
+            #   content = None
+            else:
+                expand = query.get("expand", None)
+                rev = query.get("rev", None)
                 # Determine if the remote OBS wants the expanded package
                 # for the linked package (we don't really support this, we just
                 # give packages different names)
-                if query.has_key("expand"):
-                        expand = int(query["expand"][0])
+                if expand:
+                    expand = int(expand[0])
                 # Determine what revision is being asked for of the package
-                if query.has_key("rev"):
-                        rev = query["rev"][0]
-                contentsize, contentst = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
-                # Drop contentz, we already know this from contentsize
-                contentz, content = string2stream(contentst)
-                contenttype = "application/octet-stream"
+                if rev:
+                    rev = rev[0]
+
+                # This will return a XML document containing the files of the package at the time of the revision
+                contentsize, content = string2stream(gitmds2.get_package_index(project, sourcesplit[1], rev))
+                contenttype = "text/xml"
                 contentmtime = time.time()
-              # /public/source/PROJECTNAME/PACKAGE/filename
-              else:
-                 content = None
-        else:
-            content = None
-        
-        if content is None:
-              print "404: path"
-              self.send_error(404, "File not found")
-              return None
-              
+
+        elif len(sourcesplit) == 3:
+            expand = query.get("expand", None)
+            rev = query.get("rev", None)
+            # Determine if the remote OBS wants the expanded package
+            # for the linked package (we don't really support this, we just
+            # give packages different names)
+            if expand:
+                expand = int(expand[0])
+            # Determine what revision is being asked for of the package
+            if rev:
+                rev = rev[0]
+            contentsize, contentst = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
+            # Drop contentz, we already know this from contentsize
+            contentz, content = string2stream(contentst)
+            contenttype = "application/octet-stream"
+            contentmtime = time.time()
+        # /public/source/PROJECTNAME/PACKAGE/filename
+        #else:
+        #   content = None
+
+        if not content:
+            print "404: %s" % os.path.join(sourcesplit)
+            self.send_error(404, "File not found")
+            return None
+
         self.send_response(200)
         self.send_header("Content-type", contenttype)
         self.send_header("Content-Length", contentsize)
         self.send_header("Last-Modified", self.date_time_string(contentmtime))
         self.end_headers()
         return content
+
+    def handle_build(self, pathparts, query):
+        content = None
+        #Mer:Trunk:Base/standard/i586/_repository?view=cache
+        if len(pathparts) >= 3:
+            prj_path = lookup_binariespath(pathparts[0])
+            if not prj_path:
+                print "404: %s" % os.path.join(pathparts)
+                self.send_error(404, "File not found")
+                return None
+
+            target = os.path.join(prj_path, pathparts[1], pathparts[2])
+            if not os.path.exists(target):
+                print "404: %s" % os.path.join(pathparts)
+                self.send_error(404, "File not found")
+                return None
+
+            binary = query.get("binary", None)
+            if not isinstance(binary, list):
+                binary = []
+
+            view = query.get("view", None) 
+            if isinstance(view, list):
+                view = view[0]
+            else:
+                view = "names"
+
+            print target
+            print view
+            print binary
+
+            if view == "cache" or view == "solvstate":
+                if os.path.isfile(target + "/_repository?view=" + view):
+                    contentsize, contentmtime, content = file2stream(target + "/_repository?view=" + view)
+                    contenttype = "application/octet-stream"
+                else:
+                    contentsize, contentmtime, content = file2stream("tools/emptyrepositorycache.cpio")
+                    contenttype = "application/octet-stream"
+
+            elif view == "cpio":
+                binaries = ""
+                for x in query["binary"]:
+                    if not os.path.isfile(target + "/" + os.path.basename(x) + ".rpm"):
+                        #FIXME: shouldn't an error be raised here
+                        print target + "/" + os.path.basename(x) + ".rpm was not found"
+                    binaries = binaries + os.path.basename(x) + ".rpm\n"
+                print binaries
+
+                cpiooutput = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
+                contentsize, content = string2stream(cpiooutput)
+                print contentsize
+                contentmtime = time.time()
+                contenttype = "application/x-cpio"
+
+            elif view == "names":
+                if os.path.isfile(target + "/_repository?view=names"):
+                    doc = etree.parse(target + "/_repository?view=names").getroot()
+                    removables = []
+                    for x in doc.iter("binary"):
+                        if not os.path.splitext(x.attrib["filename"])[0] in binary:
+                            removables.append(x)
+                    for x in removables:
+                        doc.remove(x)
+                    contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
+                    contentmtime = time.time()
+                    contenttype = "text/html"
+                else:
+                    contentsize, content = string2stream("<binarylist />")
+                    contenttype = "text/html"
+                    contentmtime = time.time()
+                ##
+            elif view == "binaryversions":
+                if os.path.isfile(target + "/_repository?view=cache"):
+                    doc = etree.parse(target + "/_repository?view=binaryversions").getroot()
+                    removables = []
+                    for x in doc.iter("binary"):
+                        if not os.path.splitext(x.attrib["name"])[0] in binary:
+                            removables.append(x)
+                    for x in removables:
+                        doc.remove(x)
+                    contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
+                    contentmtime = time.time()
+                    contenttype = "text/html"
+                else:
+                    contentsize, content = string2stream("<binaryversionlist />")
+                    contenttype = "text/html"
+                    contentmtime = time.time()
         
-    def copyfile(self, source, outputfile):
-        """Copy all data between two file objects.
+        if not content:
+            print "404: %s" % os.path.join(pathparts)
+            self.send_error(404, "File not found")
+            return None
 
-        The SOURCE argument is a file object open for reading
-        (or anything with a read() method) and the DESTINATION
-        argument is a file object open for writing (or
-        anything with a write() method).
+        self.send_response(200)
+        self.send_header("Content-type", contenttype)
+        self.send_header("Content-Length", contentsize)
+        self.send_header("Last-Modified", self.date_time_string(contentmtime))
+        self.end_headers()
+        return content
 
-        The only reason for overriding this would be to change
-        the block size or perhaps to replace newlines by CRLF
-        -- note however that this the default server uses this
-        to copy binary data as well.
+    def handle_lastevents(self, urlsplit, query):
+        start = query.get("start", None)
+        qfilters = query.get("filter", None)
+        filters = []
+        obsname = query.get("obsname", "")
+        threading.current_thread().name = "OBS Watcher %s" % obsname
 
-        """
-        shutil.copyfileobj(source, outputfile)
-    
+        if start:
+            start = int(start[0])
+            for x in qfilters:
+                spl = x.split('/')
+                if len(spl) == 2:
+                    filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), None))
+                else:
+                    filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), urllib.unquote(spl[2])))
+
+            print "%s: will poll every 10 seconds" % threading.current_thread().name
+
+            while start == gitmer.get_next_event():
+                time.sleep(10)
+
+            contentsize, content = string2stream(gitmer.get_events_filtered(start, filters))
+            contenttype = "text/html"
+            contentmtime = time.time()
+        else:
+            output = '<events next="' + str(gitmer.get_next_event()) + '" sync="lost" />\n'
+
+            contentsize, content = string2stream(output)
+            contenttype = "text/html"
+            contentmtime = time.time()
+
+        self.send_response(200)
+        self.send_header("Content-type", contenttype)
+        self.send_header("Content-Length", contentsize)
+        self.send_header("Last-Modified", self.date_time_string(contentmtime))
+        self.end_headers()
+        return content
+
     
 class MDSWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
-        pass
+    pass
 
-# Set up a one-thread-per-request http server on the port indicated in sys.argv[1]
-PORT = int(sys.argv[1])
+def warm_cache():
+    _ = gitmds2.get_mappingscache()
+    _ = get_mappings()
+    print "Cache ready"
 
-httpd = MDSWebServer(("0.0.0.0", PORT), MDSHTTPRequestHandler)
-httpd.serve_forever()
+def termhandler(signum, frame):
+    print 'Got a SIGTERM ...'
+    frame.f_locals["httpd"].shutdown()
 
-  
+def sigusr1handler(signum, frame):
+    print 'Got a SIGUSR1 ...'
+    for t in threading.enumerate():
+        print t.name
+
+if __name__ == "__main__":
+
+    PORT = int(sys.argv[1])
+    httpd = MDSWebServer(("0.0.0.0", PORT), MDSHTTPRequestHandler)
+
+    try:
+        # preload some stuff
+        warm_cache()
+        # Start a thread with the server -- that thread will then start one
+        # more thread for each request
+        server_thread = threading.Thread(target=httpd.serve_forever)
+
+        # Exit the server thread when the main thread terminates
+        server_thread.daemon = True
+        server_thread.name = "MDSWebServer"
+        server_thread.start()
+        
+        signal.signal(signal.SIGTERM, termhandler)
+        signal.signal(signal.SIGUSR1, sigusr1handler)
+
+        print "%s thread running" % server_thread.name
+        while server_thread.is_alive():
+            time.sleep(2)
+
+    except KeyboardInterrupt:
+        print "Shutdown requested ..."
+        httpd.shutdown()
+
+    print "Shutdown complete."
+    sys.exit(0)
+
