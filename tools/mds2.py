@@ -12,6 +12,7 @@ import traceback
 import subprocess
 import threading
 import signal
+import logging
 
 try:
     from lxml import etree
@@ -25,6 +26,9 @@ try:
     from cStringIO import StringIO
 except ImportError:
     from StringIO import StringIO
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log = logging.getLogger("mds2.api")
 
 # Handy helpers:
 #  This converts a string into a stream and returns the size and the content stream
@@ -57,43 +61,6 @@ def copyfile(source, outputfile):
     """
     shutil.copyfileobj(source, outputfile)
 
-myLock = threading.Lock()
-
-def synchronized(lock):
-    """ Synchronization decorator. """
-
-    def wrap(f):
-        def newFunction(*args, **kw):
-            lock.acquire()
-            try:
-                return f(*args, **kw)
-            finally:
-                lock.release()
-        return newFunction
-    return wrap
-
-@synchronized(myLock)
-def get_mappings():
-    if not hasattr(get_mappings, "mcache"):
-        get_mappings.mcache = etree.parse("mappings.xml").getroot()
-        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
-    stat = os.stat("mappings.xml")
-    if get_mappings.mcachetime != stat.st_mtime:
-        print "mappings.xml was updated, reloading.."
-        get_mappings.mcache = etree.parse("mappings.xml").getroot()
-        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
-    return get_mappings.mcache
-
-def lookup_binariespath(projectname):
-    binaries_path = None
-    for x in get_mappings().iter("mapping"):
-        #if x.attrib["project"] == projectname:
-        binaries_path = os.path.join(x.attrib["binaries"], projectname)
-    if os.path.exists(binaries_path):
-        return binaries_path
-    else:
-        return None
-
 # MDSHTTPRequestHandler handles the incoming HTTP requests
 # The basic flow is that GET/POST/HEAD attempts to 
 # run the send_head command, and if that throws an exception,
@@ -112,7 +79,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             f = self.send_head()
         except: 
             self.send_response(500)
-            print "500: " + self.path
+            log.warn("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
         if f:
@@ -137,7 +104,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             f = self.send_head()
         except:
             self.send_response(500)
-            print "500: " + self.path
+            log.info("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
         if f:
@@ -173,23 +140,31 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             query = {}
 
-        urlsplit = urlpath.split("/")[3:]
+        # support both OBS remote link and direct osc
+        if urlpath.startswith("/public"):
+            urlpath = urlpath.replace("/public", "", 1)
+
+        urlsplit = urlpath.split("/")[2:]
         # Begin handling the requests
         # This handles OBS API /public/source/*
-        if urlpath.startswith("/public/source/"):
+        if urlpath.startswith("/source"):
             return self.handle_source(urlsplit, query)
         # entry point for binary build result repos OBS API /public/build/*
-        elif urlpath.startswith("/public/build"):
+        elif urlpath.startswith("/build"):
             return self.handle_build(urlsplit, query)
-        elif urlpath.startswith("/public/lastevents"):
+        elif urlpath.startswith("/lastevents"):
             return self.handle_lastevents(urlsplit, query)
+        else:
+            #unsupported
+            raise RuntimeError("unsupported API %s" % self.path)
 
     def handle_source(self, sourcesplit, query):
         content = None
         # Fetch the project description (packages, other meta data, etc) dictionary for the indicated project
         project = gitmds2.get_project(sourcesplit[0])
+
         if not project:
-            print "404: %s" % os.path.join(sourcesplit)
+            log.info("404: %s" % os.path.join(sourcesplit))
             self.send_error(404, "File not found")
             return None
 
@@ -259,10 +234,8 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         # /public/source/PROJECTNAME/PACKAGE/filename
         #else:
         #   content = None
-
-        if not content:
-            print "404: %s" % os.path.join(sourcesplit)
-            self.send_error(404, "File not found")
+        if not content or not contentsize:
+            self.send_error(404, "File not found %s" % os.path.join(*sourcesplit))
             return None
 
         self.send_response(200)
@@ -276,7 +249,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         content = None
         #Mer:Trunk:Base/standard/i586/_repository?view=cache
         if len(pathparts) >= 3:
-            prj_path = lookup_binariespath(pathparts[0])
+            prj_path = gitmds2.lookup_binariespath(pathparts[0])
             if not prj_path:
                 print "404: %s" % os.path.join(pathparts)
                 self.send_error(404, "File not found")
@@ -359,9 +332,8 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     contenttype = "text/html"
                     contentmtime = time.time()
         
-        if not content:
-            print "404: %s" % os.path.join(pathparts)
-            self.send_error(404, "File not found")
+        if not content or not contentsize:
+            self.send_error(404, "File not found %s" % os.path.join(*pathparts))
             return None
 
         self.send_response(200)
@@ -387,16 +359,16 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), urllib.unquote(spl[2])))
 
-            print "%s: will poll every 10 seconds" % threading.current_thread().name
+            log.info("%s: will poll every 10 seconds" % threading.current_thread().name)
 
-            while start == gitmer.get_next_event():
+            while start == gitmds2.get_next_event():
                 time.sleep(10)
 
-            contentsize, content = string2stream(gitmer.get_events_filtered(start, filters))
+            contentsize, content = string2stream(gitmds2.get_events_filtered(start, filters))
             contenttype = "text/html"
             contentmtime = time.time()
         else:
-            output = '<events next="' + str(gitmer.get_next_event()) + '" sync="lost" />\n'
+            output = '<events next="' + str(gitmds2.get_next_event()) + '" sync="lost" />\n'
 
             contentsize, content = string2stream(output)
             contenttype = "text/html"
@@ -413,17 +385,20 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 class MDSWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     pass
 
+def refresh_cache():
+    gitmds2.generate_mappings("mappingscache.xml", "lastevents.xml")
+
 def warm_cache():
+    _ = gitmds2.get_mappings()
     _ = gitmds2.get_mappingscache()
-    _ = get_mappings()
-    print "Cache ready"
+    log.info("Cache ready")
 
 def termhandler(signum, frame):
-    print 'Got a SIGTERM ...'
+    log.info('Got a SIGTERM ...')
     frame.f_locals["httpd"].shutdown()
 
 def sigusr1handler(signum, frame):
-    print 'Got a SIGUSR1 ...'
+    log.info('Got a SIGUSR1 ...')
     for t in threading.enumerate():
         print t.name
 
@@ -431,8 +406,12 @@ if __name__ == "__main__":
 
     PORT = int(sys.argv[1])
     httpd = MDSWebServer(("0.0.0.0", PORT), MDSHTTPRequestHandler)
+    log = logging.getLogger("mds2")
+    log.setLevel(logging.INFO)
 
     try:
+        # refresh caches
+        refresh_cache()
         # preload some stuff
         warm_cache()
         # Start a thread with the server -- that thread will then start one
@@ -447,14 +426,15 @@ if __name__ == "__main__":
         signal.signal(signal.SIGTERM, termhandler)
         signal.signal(signal.SIGUSR1, sigusr1handler)
 
-        print "%s thread running" % server_thread.name
+        log.info("%s thread running" % server_thread.name)
         while server_thread.is_alive():
             time.sleep(2)
 
     except KeyboardInterrupt:
-        print "Shutdown requested ..."
+        log.info("Shutdown requested ...")
         httpd.shutdown()
 
-    print "Shutdown complete."
+    log.info("Shutdown complete.")
+    logging.shutdown()
     sys.exit(0)
 

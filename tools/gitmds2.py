@@ -3,7 +3,12 @@ import git
 import hashlib
 import os
 import glob
+import csv
 from subprocess import Popen, PIPE
+import logging
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log = logging.getLogger("mds2.git")
 
 try:
     from lxml import etree
@@ -13,7 +18,7 @@ except ImportError:
     except ImportError:
         import xml.etree.ElementTree as etree
 
-myLock = Lock()
+mappingsCacheLock = Lock()
 
 def synchronized(lock):
     """ Synchronization decorator. """
@@ -28,17 +33,41 @@ def synchronized(lock):
         return newFunction
     return wrap
 
-@synchronized(myLock)
+@synchronized(mappingsCacheLock)
 def get_mappingscache():
     if not hasattr(get_mappingscache, "mcache"):
-        get_mappingscache.mcache = etree.parse("packages-git/mappingscache.xml").getroot()
-        get_mappingscache.mcachetime = os.stat("packages-git/mappingscache.xml").st_mtime
-    stat = os.stat("packages-git/mappingscache.xml")
+        get_mappingscache.mcache = etree.parse("mappingscache.xml").getroot()
+        get_mappingscache.mcachetime = os.stat("mappingscache.xml").st_mtime
+    stat = os.stat("mappingscache.xml")
     if get_mappingscache.mcachetime != stat.st_mtime:
-        print "mappings cache was updated, reloading.."
-        get_mappingscache.mcache = etree.parse("packages-git/mappingscache.xml").getroot()
-        get_mappingscache.mcachetime = os.stat("packages-git/mappingscache.xml").st_mtime
+        log.info("mappings cache was updated, reloading..")
+        get_mappingscache.mcache = etree.parse("mappingscache.xml").getroot()
+        get_mappingscache.mcachetime = os.stat("mappingscache.xml").st_mtime
     return get_mappingscache.mcache
+
+mappingsLock = Lock()
+
+@synchronized(mappingsLock)
+def get_mappings():
+    if not hasattr(get_mappings, "mcache"):
+        get_mappings.mcache = etree.parse("mappings.xml").getroot()
+        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
+    stat = os.stat("mappings.xml")
+    if get_mappings.mcachetime != stat.st_mtime:
+        log.info("mappings.xml was updated, reloading..")
+        get_mappings.mcache = etree.parse("mappings.xml").getroot()
+        get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
+    return get_mappings.mcache
+
+def lookup_binariespath(projectname):
+    binaries_path = None
+    for x in get_mappings().iter("mapping"):
+        #if x.attrib["project"] == projectname:
+        binaries_path = os.path.join(x.attrib["binaries"], projectname)
+    if os.path.exists(binaries_path):
+        return binaries_path
+    else:
+        return None
 
 def git_cat(gitpath, blob):
     return Popen(["git", "--git-dir=" + gitpath, "cat-file", "blob", blob.hexsha], stdout=PIPE).communicate()[0]   
@@ -65,14 +94,13 @@ def get_project(projectname):
     project["prjgitbranch"] = breakdown[1]
     project["prjsubdir"] = breakdown[2]
 
-    doc = etree.parse("mappings.xml").getroot()
     found = False
-    for x in doc.iter("mapping"):
+    for x in get_mappings().iter("mapping"):
         if x.attrib["project"] == project["prjname"]:
             found = True
             project["prjgitrepo"] = x.attrib["path"]
             break
-    
+
     if not found:
         return None
     
@@ -106,11 +134,10 @@ def get_project(projectname):
 def build_project_index(project):
     indexdoc = etree.Element('directory')
     doc = etree.ElementTree(indexdoc)
-
     packagesdoc = project["packages"]
     for x in packagesdoc.iter("package"):
         entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["name"])
-    for x in packagesdoc.getElementsByTagName("link"):
+    for x in packagesdoc.iter("link"):
         entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["to"])
     return etree.tostring(doc, pretty_print=True)
 
@@ -185,9 +212,10 @@ def get_package_index(project, packagename, getrev):
         getrev = get_latest_commit(project, packagename)
 
     try:
-        commit, rev, srcmd5, tree, git = get_package_tree_from_commit_or_rev(project, packagename, getrev)
+        #commit, rev, srcmd5, tree, git = get_package_tree_from_commit_or_rev(project, packagename, getrev)
+        commit, rev, srcmd5, tree, _ = get_package_tree_from_commit_or_rev(project, packagename, getrev)
     except TypeError:
-        return None
+        return ""
     mtime, vrev = get_package_commit_mtime_vrev(project, packagename)
     entrymd5s = get_entries_from_commit(project, packagename, commit)
 
@@ -206,49 +234,49 @@ def get_package_index(project, packagename, getrev):
                                             md5 = entrymd5s[entry.name])
     return etree.tostring(doc, pretty_print=True)
 
-def generate_mappings(repos):
-    indexdoc = etree.Element('maps')
-    doc = etree.ElementTree(indexdoc)
-    
-    for x in repos:
-        pkgelement = etree.SubElement(indexdoc, 'repo', path = x)
-
-        repo = git.Repo(x, odbt=git.GitDB)
-        for branch in repo.heads:
-            toprev = 0
-            for xz in repo.iter_commits(branch):
-                toprev = toprev + 1
-            rev = 0
-
-            for cm in repo.iter_commits(branch):
-                entries = {}
-                for entry in cm.tree:
-                    if entry.name == "_meta" or entry.name == "_attribute":
-                        continue
-                    st = git_cat(x, entry)
-                    assert len(st) == entry.size
-                    m = hashlib.md5(st)
-                    entries[entry.name] = m.hexdigest()
-                sortedkeys = sorted(entries.keys())
-                meta = ""
-                for y in sortedkeys:
-                    meta += entries[y]
-                    meta += "  "
-                    meta += y
-                    meta += "\n"
-
-                m = hashlib.md5(meta)
-                mapelm = etree.SubElement( pkgelement, 'map', branch = branch.name,
-                                                              commit = cm.hexsha,
-                                                              srcmd5 = m.hexdigest(),
-                                                              rev    = str(toprev-rev))
-                for y in sortedkeys:
-                    entryelm = etree.SubElement(mapelm, "entry", name = y,
-                                                                 md5 = entries[y])
-
-                rev = rev + 1
-        rev = rev + 1
-    return etree.tostring(doc, pretty_print=True)
+#def generate_mappings(repos):
+#    indexdoc = etree.Element('maps')
+#    doc = etree.ElementTree(indexdoc)
+#    
+#    for x in repos:
+#        pkgelement = etree.SubElement(indexdoc, 'repo', path = x)
+#
+#        repo = git.Repo(x, odbt=git.GitDB)
+#        for branch in repo.heads:
+#            toprev = 0
+#            for xz in repo.iter_commits(branch):
+#                toprev = toprev + 1
+#            rev = 0
+#
+#            for cm in repo.iter_commits(branch):
+#                entries = {}
+#                for entry in cm.tree:
+#                    if entry.name == "_meta" or entry.name == "_attribute":
+#                        continue
+#                    st = git_cat(x, entry)
+#                    assert len(st) == entry.size
+#                    m = hashlib.md5(st)
+#                    entries[entry.name] = m.hexdigest()
+#                sortedkeys = sorted(entries.keys())
+#                meta = ""
+#                for y in sortedkeys:
+#                    meta += entries[y]
+#                    meta += "  "
+#                    meta += y
+#                    meta += "\n"
+#
+#                m = hashlib.md5(meta)
+#                mapelm = etree.SubElement( pkgelement, 'map', branch = branch.name,
+#                                                              commit = cm.hexsha,
+#                                                              srcmd5 = m.hexdigest(),
+#                                                              rev    = str(toprev-rev))
+#                for y in sortedkeys:
+#                    entryelm = etree.SubElement(mapelm, "entry", name = y,
+#                                                                 md5 = entries[y])
+#
+#                rev = rev + 1
+#        rev = rev + 1
+#    return etree.tostring(doc, pretty_print=True)
 
 def get_if_disable(project, packagename):
     packagesdoc = project["packages"]
@@ -302,56 +330,270 @@ def get_package_file(project, packagename, filename, getrev):
     except TypeError:
         pass
 
-    return None
+    return ""
 
-def generate_mappings(cachefile):
-    if os.path.exists(cachefile):
-        print "cachefile exists, reusing it"
+def get_next_event():
+        f = open("lastevents", 'rb')
+        csvReader = csv.reader(f, delimiter='|', quotechar='"')
+        last = 0
+        for row in csvReader:
+            last = int(row[0])
+        f.close()
+        return last
+
+def get_events_filtered(start, filters):
+    with open("lastevents", 'rb') as f:
+        indexdoc = etree.Element('events', next = str(get_next_event()))
+        impl = etree.ElementTree(indexdoc)
+
+        csvReader = csv.reader(f, delimiter='|', quotechar='"')
+        for row in csvReader:
+            num = int(row[0])
+            if num <= start:
+                continue
+            is_ok = False
+            for filter in filters:
+                if filter[2] is None:
+                    if filter[0] == row[2] and filter[1] == row[3]:
+                       is_ok = True
+                elif filter[0] == row[2] and filter[1] == row[3] and filter[2] == row[4]:
+                    is_ok = True
+            else:
+                is_ok = True
+            if is_ok:
+                eventelm = etree.SubElement(indexdoc, "event", type = row[2])
+                if row[2] == "package":
+                    #prjelm = indexdoc.createElement("project")
+                    #prjtext = indexdoc.createTextNode(row[3])
+                    #prjelm.appendChild(prjtext)
+                    #eventelm.appendChild(prjelm)
+                    prjelm = etree.SubElement(eventelm, "project")
+                    prjelm.text = row[3]
+
+                    #packageelm = indexdoc.createElement("package")
+                    #packagetext = indexdoc.createTextNode(row[4])
+                    #packageelm.appendChild(packagetext)
+                    #eventelm.appendChild(packageelm)
+                    packageelm = etree.SubElement(eventelm, "package")
+                    packageelm.text = row[4]
+
+                if row[2] == "repository":
+                    #prjelm = indexdoc.createElement("project")
+                    #prjtext = indexdoc.createTextNode(row[3])
+                    #prjelm.appendChild(prjtext)
+                    #eventelm.appendChild(prjelm)
+                    prjelm = etree.SubElement(eventelm, "project")
+                    prjelm.text = row[3]
+
+                    #repelm = indexdoc.createElement("repository")
+                    #reptext = indexdoc.createTextNode(row[4])
+                    #repelm.appendChild(reptext)
+                    #eventelm.appendChild(repelm)
+                    repelm = etree.SubElement(eventelm, "repository")
+                    repelm.text = row[4]
+
+
+                    #archelm = indexdoc.createElement("arch")
+                    #archtext = indexdoc.createTextNode(row[5])
+                    #archelm.appendChild(archtext)
+                    #eventelm.appendChild(archelm)
+                    archelm = etree.SubElement(eventelm, "arch")
+                    archelm.text = row[4]
+
+                if row[2] == "project":
+                    #prjelm = indexdoc.createElement("project")
+                    #prjtext = indexdoc.createTextNode(row[3])
+                    #prjelm.appendChild(prjtext)
+                    #eventelm.appendChild(prjelm)
+                    prjelm = etree.SubElement(eventelm, "project")
+                    prjelm.text = row[3]
+
+                #indexdoc.childNodes[0].appendChild(eventelm)
+        #f.close()
+#  XXX add support for project events and repository events
+#        print indexdoc.childNodes[0].toxml(encoding="us-ascii")
+
+        #return indexdoc.childNodes[0].toxml(encoding="us-ascii")
+    return etree.tostring(indexdoc, pretty_print=True)
+
+def update_lastevents(project, branch, cm, entry, events):
+
+    blobs = [entry]
+    subprj = ":".join([project, branch.name])
+    # if this is a tree (subdir) get blobs one level in
+    if entry.type == "tree":
+        blobs = entry.blobs
+        subprj = ":".join([subprj, entry.path])
+    
+    for blob in blobs:
+        # only want blobs that are in the list, no deeper subdirs
+        if blob.type != "blob":
+            continue
+        # _config and _meta changes trigger project events
+        if blob.name == "_config" or blob.name == "_meta":
+            log.debug("project %s event" % subprj)
+            eventelm = etree.SubElement(events, "event", type = "project")
+            prjelm = etree.SubElement(eventelm, "project")
+            prjelm.text = subprj
+        # packages.xml changes trigger package events
+        elif blob.name == "packages.xml":
+            difflist = []
+            try:
+                # diff to previous commit, with least possible cruft, discarding header
+                difflist = cm.diff(other=cm.hexsha+"~1", paths=[blob.path], create_patch=True, U=0)
+            except git.exc.GitCommandError:
+                # this exception will be raised in some cases such as the initial commit where there is no previous commit
+                pass
+            if difflist:
+                pdiff = difflist[0].diff.splitlines()[3:]
+                for line in pdiff:
+                    # lines starting with - mean either package was updated or removed
+                    if line.startswith("-") and line[1:].strip():
+                        # extract the package name, or link target from the xml element
+                        pkg = None
+                        log.debug(line)
+                        try:
+                            pelem = etree.fromstring(line[1:].strip())
+                            log.debug(etree.tostring(pelem))
+                            if pelem.tag == "package":
+                                pkg = pelem.attrib['name']
+                            elif pelem.tag == "link":
+                                pkg = pelem.attrib['to']
+                        except etree.XMLSyntaxError:
+                            pass
+    
+                        if pkg:
+                            log.debug("project %s package %s event" % (subprj, pkg))
+                            eventelm = etree.SubElement(events, "event", type = "package")
+                            prjelm = etree.SubElement(eventelm, "project")
+                            prjelm.text = subprj
+                            pkgelm = etree.SubElement(eventelm, "package")
+                            pkgelm.text = pkg
+        #FIXME: repo events ?
+
+def initial_lastevents(project, branch, events):
+
+    subprj = ":".join([project, branch.name])
+    # Get root tree of branch
+    root = branch.repo.tree()
+    # collect blobs from root and subdirs
+    blobs = []
+    for tree in root.trees:
+        if tree.type == "blob":
+            blobs.append(tree)
+        elif tree.type == "tree":
+            blobs.extend(tree.blobs)
+    # generate initial events for blobs we care about
+    for blob in blobs:
+        if os.path.dirname(blob.path):
+            subprj = ":".join([project, branch.name, os.path.dirname(blob.path)])
+        if blob.name == "_config" or blob.name == "_meta":
+            log.debug("project %s event" % subprj)
+            eventelm = etree.SubElement(events, "event", type = "project")
+            prjelm = etree.SubElement(eventelm, "project")
+            prjelm.text = subprj
+        # packages.xml changes trigger package events
+        elif blob.name == "packages.xml":
+            pxml = etree.fromstring(git_cat(branch.repo.working_dir, blob))
+            for pkg in pxml.iter("package"):
+                pkg_name = pkg.attrib['name']
+                log.debug("project %s package %s event" % (subprj, pkg_name))
+                eventelm = etree.SubElement(events, "event", type = "package")
+                prjelm = etree.SubElement(eventelm, "project")
+                prjelm.text = subprj
+                pkgelm = etree.SubElement(eventelm, "package")
+                pkgelm.text = pkg_name
+            for pkg in pxml.iter("link"):
+                pkg_name = pkg.attrib['to']
+                log.debug("project %s package %s event" % (subprj, pkg_name))
+                eventelm = etree.SubElement(events, "event", type = "package")
+                prjelm = etree.SubElement(eventelm, "project")
+                prjelm.text = subprj
+                pkgelm = etree.SubElement(eventelm, "package")
+                pkgelm.text = pkg_name
+        #FIXME: repo events ?
+
+def generate_mappings(cachefile, eventsfile):
+
+    if os.path.exists(cachefile) and os.path.exists(eventsfile):
+        log.info("%s exists, reusing it" % cachefile)
         parser = etree.XMLParser(remove_blank_text=True)
-        indexdoc = etree.parse(cachefile, parser).getroot()
+        maps = etree.parse(cachefile, parser).getroot()
+        events = etree.parse(eventsfile, parser).getroot()
+        initial = False
     else:
-        print "new cachefile"
-        indexdoc = etree.Element('maps')
+        log.info("creating new %s" % cachefile)
+        maps = etree.Element('maps')
+        events = etree.Element('events')
+        initial = True
 
-    doc = etree.ElementTree(indexdoc)
-    print "generating mappings" 
+    mapdoc = etree.ElementTree(maps)
+    eventdoc = etree.ElementTree(events)
 
-    for x in glob.iglob("packages-git/*/*"):
+    for x in glob.iglob("*-git/*/*"):
+        # filter out non directories
         if not os.path.isdir(x):
             continue
 
-        print x
-        repoelement = indexdoc.xpath("//repo[@path='%s']" % x)
+        # if this git repo is a "projects repo" turn on generating events
+        project = None
+        prjmap = get_mappings().xpath("//mapping[@path='%s']" % x)
+        if prjmap:
+            project = prjmap[0].attrib.get("project", None)
+            binaries = prjmap[0].attrib.get("binaries", None)
+
+        log.debug(x)
+        repoelement = maps.xpath("//repo[@path='%s']" % x)
         if repoelement:
             repoelement = repoelement[0]
         else:
-            print "not cached"
-            repoelement = etree.SubElement(indexdoc, "repo", path = x)
+            log.debug("not cached")
+            repoelement = etree.SubElement(maps, "repo", path = x)
 
         repo = git.Repo(x, odbt=git.GitDB)
         for branch in repo.heads:
-            print branch.name
+            log.debug(branch.name)
             seenrevs = len(repoelement.xpath("./map[@branch='%s']" % branch.name))
-            print "%s revs already cached" % seenrevs
+            log.debug("%s revs already cached" % seenrevs)
             toprev = 0
             for xz in repo.iter_commits(branch):
                 toprev = toprev + 1
-            print "%s revs in %s" % (toprev, branch.name)
+            log.debug("%s revs in %s" % (toprev, branch.name))
             if seenrevs == toprev:
-                print "no new revs, skipping"
+                log.debug("no new revs, skipping")
                 continue
 
             rev = 0
 
+            # if generating events from scratch for projects
+            if project and initial:
+                initial_lastevents(project, branch, events)
+
             for cm in repo.iter_commits(branch):
                 entries = {}
                 for entry in cm.tree:
-                    if entry.name == "_meta" or entry.name == "_attribute":
-                         continue
-                    st = git_cat(x, entry)
-                    #assert len(st) == entry.size
-                    m = hashlib.md5(st)
-                    entries[entry.name] = m.hexdigest()
+
+                    blobs = [entry]
+                    # if project is set, generate appropriate events for this commit
+
+                    if project and not initial:
+                        update_lastevents(project, branch, cm, entry, events)
+
+                    for blob in blobs:
+                        # only want blobs that are in the list, no deeper subdirs
+                        if blob.type != "blob":
+                            continue
+
+                        # _meta and _attribute files are not included in mappings cache
+                        if blob.name == "_meta" or blob.name == "_attribute":
+                            continue
+
+                        #FIXME: is there a smarter way to md5sum hash an object without loading the whole thing in memory ?
+                        st = git_cat(x, blob)
+                        #assert len(st) == entry.size
+                        m = hashlib.md5(st)
+                        entries[blob.path] = m.hexdigest()
+
                 sortedkeys = sorted(entries.keys())
                 meta = ""
                 for y in sortedkeys:
@@ -362,16 +604,19 @@ def generate_mappings(cachefile):
 
                 m = hashlib.md5(meta)
                 mapelm = etree.SubElement(repoelement, "map", branch = branch.name,
-                                                             commit = cm.hexsha,
-                                                             srcmd5 = m.hexdigest(),
-                                                             rev = str(toprev-rev))
+                                                              commit = cm.hexsha,
+                                                              srcmd5 = m.hexdigest(),
+                                                              rev = str(toprev-rev))
                 for y in sortedkeys:
                     entryelm = etree.SubElement(mapelm, "entry", name = y,
                                                                  md5 = entries[y])
+
                 rev = rev + 1
                 if toprev - rev == seenrevs:
-                    "finished new revs"
+                    log.debug("finished new revs")
                     break
 
-    return doc.write(cachefile, pretty_print=True)
+    mapdoc.write(cachefile, pretty_print=True)
+    eventdoc.write(eventsfile, pretty_print=True)
+    log.info("%s now up to date" % cachefile)
 
