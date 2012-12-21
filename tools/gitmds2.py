@@ -59,6 +59,22 @@ def get_mappings():
         get_mappings.mcachetime = os.stat("mappings.xml").st_mtime
     return get_mappings.mcache
 
+lasteventsLock = Lock()
+
+@synchronized(lasteventsLock)
+def get_lastevents():
+    if not hasattr(get_lastevents, "mcache"):
+        get_lastevents.mcache = etree.parse("lastevents.xml").getroot()
+        get_lastevents.mcachetime = os.stat("lastevents.xml").st_mtime
+        get_lastevents.ecount = len(get_lastevents.mcache.xpath("//event"))
+    stat = os.stat("lastevents.xml")
+    if get_lastevents.mcachetime != stat.st_mtime:
+        log.info("lastevents.xml was updated, reloading..")
+        get_lastevents.mcache = etree.parse("lastevents.xml").getroot()
+        get_lastevents.mcachetime = os.stat("lastevents.xml").st_mtime
+        get_lastevents.ecount = len(get_lastevents.mcache.xpath("//event"))
+    return get_lastevents.mcache
+
 def lookup_binariespath(projectname):
     binaries_path = None
     for x in get_mappings().iter("mapping"):
@@ -234,50 +250,6 @@ def get_package_index(project, packagename, getrev):
                                             md5 = entrymd5s[entry.name])
     return etree.tostring(doc, pretty_print=True)
 
-#def generate_mappings(repos):
-#    indexdoc = etree.Element('maps')
-#    doc = etree.ElementTree(indexdoc)
-#    
-#    for x in repos:
-#        pkgelement = etree.SubElement(indexdoc, 'repo', path = x)
-#
-#        repo = git.Repo(x, odbt=git.GitDB)
-#        for branch in repo.heads:
-#            toprev = 0
-#            for xz in repo.iter_commits(branch):
-#                toprev = toprev + 1
-#            rev = 0
-#
-#            for cm in repo.iter_commits(branch):
-#                entries = {}
-#                for entry in cm.tree:
-#                    if entry.name == "_meta" or entry.name == "_attribute":
-#                        continue
-#                    st = git_cat(x, entry)
-#                    assert len(st) == entry.size
-#                    m = hashlib.md5(st)
-#                    entries[entry.name] = m.hexdigest()
-#                sortedkeys = sorted(entries.keys())
-#                meta = ""
-#                for y in sortedkeys:
-#                    meta += entries[y]
-#                    meta += "  "
-#                    meta += y
-#                    meta += "\n"
-#
-#                m = hashlib.md5(meta)
-#                mapelm = etree.SubElement( pkgelement, 'map', branch = branch.name,
-#                                                              commit = cm.hexsha,
-#                                                              srcmd5 = m.hexdigest(),
-#                                                              rev    = str(toprev-rev))
-#                for y in sortedkeys:
-#                    entryelm = etree.SubElement(mapelm, "entry", name = y,
-#                                                                 md5 = entries[y])
-#
-#                rev = rev + 1
-#        rev = rev + 1
-#    return etree.tostring(doc, pretty_print=True)
-
 def get_if_disable(project, packagename):
     packagesdoc = project["packages"]
     if packagesdoc.attrib.get("disablei586"):
@@ -333,87 +305,29 @@ def get_package_file(project, packagename, filename, getrev):
     return ""
 
 def get_next_event():
-        f = open("lastevents", 'rb')
-        csvReader = csv.reader(f, delimiter='|', quotechar='"')
-        last = 0
-        for row in csvReader:
-            last = int(row[0])
-        f.close()
-        return last
+        return get_lastevents.ecount + 1
 
 def get_events_filtered(start, filters):
-    with open("lastevents", 'rb') as f:
-        indexdoc = etree.Element('events', next = str(get_next_event()))
-        impl = etree.ElementTree(indexdoc)
+    indexdoc = etree.Element('events', next = str(get_next_event()))
+    impl = etree.ElementTree(indexdoc)
+    #filters to xpath
+    xpaths = []
+    for filtr in filters:
+        extra = ""
+        if filtr[2]:
+            extra = " and %s='%s'" % (filtr[0], filtr[2])
+        xpaths.append("./following-sibling::*[@type='%s' and project='%s'%s]" % (filtr[0], filtr[1], extra))
+    if xpaths:
+        # union of all filters
+        xpaths = " | ".join(xpaths)
+    else:
+        xpaths = "./following-sibling::*"
 
-        csvReader = csv.reader(f, delimiter='|', quotechar='"')
-        for row in csvReader:
-            num = int(row[0])
-            if num <= start:
-                continue
-            is_ok = False
-            for filter in filters:
-                if filter[2] is None:
-                    if filter[0] == row[2] and filter[1] == row[3]:
-                       is_ok = True
-                elif filter[0] == row[2] and filter[1] == row[3] and filter[2] == row[4]:
-                    is_ok = True
-            else:
-                is_ok = True
-            if is_ok:
-                eventelm = etree.SubElement(indexdoc, "event", type = row[2])
-                if row[2] == "package":
-                    #prjelm = indexdoc.createElement("project")
-                    #prjtext = indexdoc.createTextNode(row[3])
-                    #prjelm.appendChild(prjtext)
-                    #eventelm.appendChild(prjelm)
-                    prjelm = etree.SubElement(eventelm, "project")
-                    prjelm.text = row[3]
+    # get starting event
+    start_event = get_lastevents().xpath("//event[position()=%s]" % start)[0]
+    filtered = start_event.xpath(xpaths)
+    indexdoc.extend(filtered)
 
-                    #packageelm = indexdoc.createElement("package")
-                    #packagetext = indexdoc.createTextNode(row[4])
-                    #packageelm.appendChild(packagetext)
-                    #eventelm.appendChild(packageelm)
-                    packageelm = etree.SubElement(eventelm, "package")
-                    packageelm.text = row[4]
-
-                if row[2] == "repository":
-                    #prjelm = indexdoc.createElement("project")
-                    #prjtext = indexdoc.createTextNode(row[3])
-                    #prjelm.appendChild(prjtext)
-                    #eventelm.appendChild(prjelm)
-                    prjelm = etree.SubElement(eventelm, "project")
-                    prjelm.text = row[3]
-
-                    #repelm = indexdoc.createElement("repository")
-                    #reptext = indexdoc.createTextNode(row[4])
-                    #repelm.appendChild(reptext)
-                    #eventelm.appendChild(repelm)
-                    repelm = etree.SubElement(eventelm, "repository")
-                    repelm.text = row[4]
-
-
-                    #archelm = indexdoc.createElement("arch")
-                    #archtext = indexdoc.createTextNode(row[5])
-                    #archelm.appendChild(archtext)
-                    #eventelm.appendChild(archelm)
-                    archelm = etree.SubElement(eventelm, "arch")
-                    archelm.text = row[4]
-
-                if row[2] == "project":
-                    #prjelm = indexdoc.createElement("project")
-                    #prjtext = indexdoc.createTextNode(row[3])
-                    #prjelm.appendChild(prjtext)
-                    #eventelm.appendChild(prjelm)
-                    prjelm = etree.SubElement(eventelm, "project")
-                    prjelm.text = row[3]
-
-                #indexdoc.childNodes[0].appendChild(eventelm)
-        #f.close()
-#  XXX add support for project events and repository events
-#        print indexdoc.childNodes[0].toxml(encoding="us-ascii")
-
-        #return indexdoc.childNodes[0].toxml(encoding="us-ascii")
     return etree.tostring(indexdoc, pretty_print=True)
 
 def update_lastevents(project, branch, cm, entry, events):

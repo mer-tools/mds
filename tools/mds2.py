@@ -345,7 +345,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def handle_lastevents(self, urlsplit, query):
         start = query.get("start", None)
-        qfilters = query.get("filter", None)
+        qfilters = query.get("filter", [])
         filters = []
         obsname = query.get("obsname", "")
         threading.current_thread().name = "OBS Watcher %s" % obsname
@@ -391,7 +391,8 @@ def refresh_cache():
 def warm_cache():
     _ = gitmds2.get_mappings()
     _ = gitmds2.get_mappingscache()
-    log.info("Cache ready")
+    _ = gitmds2.get_lastevents()
+    log.info("Cache primed")
 
 def termhandler(signum, frame):
     log.info('Got a SIGTERM ...')
