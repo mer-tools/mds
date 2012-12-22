@@ -251,13 +251,13 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if len(pathparts) >= 3:
             prj_path = gitmds2.lookup_binariespath(pathparts[0])
             if not prj_path:
-                print "404: %s" % os.path.join(pathparts)
+                log.info("404: %s" % os.path.join(pathparts))
                 self.send_error(404, "File not found")
                 return None
 
             target = os.path.join(prj_path, pathparts[1], pathparts[2])
             if not os.path.exists(target):
-                print "404: %s" % os.path.join(pathparts)
+                log.info("404: %s" % os.path.join(pathparts))
                 self.send_error(404, "File not found")
                 return None
 
@@ -270,10 +270,6 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 view = view[0]
             else:
                 view = "names"
-
-            print target
-            print view
-            print binary
 
             if view == "cache" or view == "solvstate":
                 if os.path.isfile(target + "/_repository?view=" + view):
@@ -288,13 +284,11 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 for x in query["binary"]:
                     if not os.path.isfile(target + "/" + os.path.basename(x) + ".rpm"):
                         #FIXME: shouldn't an error be raised here
-                        print target + "/" + os.path.basename(x) + ".rpm was not found"
+                        log.info(target + "/" + os.path.basename(x) + ".rpm was not found")
                     binaries = binaries + os.path.basename(x) + ".rpm\n"
-                print binaries
 
                 cpiooutput = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
                 contentsize, content = string2stream(cpiooutput)
-                print contentsize
                 contentmtime = time.time()
                 contenttype = "application/x-cpio"
 

@@ -91,8 +91,8 @@ def git_cat(gitpath, blob):
 # Utilized in frontend.
 #
 # This basically finds the right git repository for the project
-# Each project is of the form PROJECTNAME:GITREF:SUBDIR
-# for example: Core:master:i586 means find metadata underneath i586/ directory in master branch in the 
+# Each project is of the form PROJECTNAME:SUBDIR:GITREF
+# for example: Core:i586:master means find metadata underneath i586/ directory in master branch in the 
 # git project that project name "Core" points to in mappings.xml (MDS2 project config file)
 #
 # This will either return None or a dictionary with a lot of handy metadata
@@ -107,8 +107,8 @@ def get_project(projectname):
      
     project["obsprjname"] = projectname 
     project["prjname"] = breakdown[0]
-    project["prjgitbranch"] = breakdown[1]
-    project["prjsubdir"] = breakdown[2]
+    project["prjsubdir"] = breakdown[1]
+    project["prjgitbranch"] = breakdown[2]
 
     found = False
     for x in get_mappings().iter("mapping"):
@@ -119,7 +119,7 @@ def get_project(projectname):
 
     if not found:
         return None
-    
+
     project["prjgit"] = git.Repo(project["prjgitrepo"])
     
     project["prjtree"] = project["prjgit"].tree(project["prjgitbranch"])
@@ -444,7 +444,7 @@ def generate_mappings(cachefile, eventsfile):
     mapdoc = etree.ElementTree(maps)
     eventdoc = etree.ElementTree(events)
 
-    for x in glob.iglob("*-git/*/*"):
+    for x in glob.iglob("packages-git/*/*"):
         # filter out non directories
         if not os.path.isdir(x):
             continue
