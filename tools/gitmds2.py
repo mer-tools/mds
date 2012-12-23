@@ -120,7 +120,7 @@ def get_project(projectname):
     if not found:
         return None
 
-    project["prjgit"] = git.Repo(project["prjgitrepo"])
+    project["prjgit"] = git.Repo(project["prjgitrepo"], odbt=git.GitDB)
     
     project["prjtree"] = project["prjgit"].tree(project["prjgitbranch"])
     
@@ -130,11 +130,11 @@ def get_project(projectname):
 
     project["metablob"] = project["prjtree"][project["prjsubdir"] + "/_meta"]
  
-    project["packages"] = etree.fromstring(git_cat(project["prjgitrepo"], project["packagesblob"]))
+    project["packages"] = etree.fromstring(project["packagesblob"].data_stream.read())
 
-    project["prjconf"] = git_cat(project["prjgitrepo"], project["prjconfblob"])
+    project["prjconf"] = project["prjconfblob"].data_stream.read()
 
-    project["meta"] = etree.fromstring(git_cat(project["prjgitrepo"], project["metablob"]))
+    project["meta"] = etree.fromstring(project["metablob"].data_stream.read())
     
     # We rename the project data inside meta to fit with the obs project name in the request
     for x in project["meta"].iter("project"):

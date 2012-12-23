@@ -407,7 +407,12 @@ def sigtermhandler(signum, frame):
 
 def sigusr1handler(signum, frame):
     log.info('Got a SIGUSR1 ...')
-    log.info("\n".join([t.name for t in threading.enumerate()]))
+    log.info("\n".join(["%s %s" % (t.ident, t.name) for t in threading.enumerate()]))
+
+def sigusr2handler(signum, frame):
+    log.info('Got a SIGUSR2, dropping to debugger ...')
+    import pdb
+    pdb.set_trace()
 
 if __name__ == "__main__":
 
@@ -429,9 +434,11 @@ if __name__ == "__main__":
         server_thread.daemon = True
         server_thread.name = "MDSWebServer"
         server_thread.start()
-        
+
+        # install signal handlers
         signal.signal(signal.SIGTERM, sigtermhandler)
         signal.signal(signal.SIGUSR1, sigusr1handler)
+        signal.signal(signal.SIGUSR2, sigusr2handler)
 
         log.info("%s thread running" % server_thread.name)
         while server_thread.is_alive():
