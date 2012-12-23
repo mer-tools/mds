@@ -302,7 +302,7 @@ def get_package_file(project, packagename, filename, getrev):
     except TypeError:
         pass
 
-    return ""
+    return 0, ""
 
 def get_next_event():
         return get_lastevents.ecount + 1

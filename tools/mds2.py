@@ -160,6 +160,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def handle_source(self, sourcesplit, query):
         content = None
+        contentsize = None
         # Fetch the project description (packages, other meta data, etc) dictionary for the indicated project
         project = gitmds2.get_project(sourcesplit[0])
 
@@ -234,7 +235,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         # /public/source/PROJECTNAME/PACKAGE/filename
         #else:
         #   content = None
-        if not content or not contentsize:
+        if content is None or contentsize is None:
             self.send_error(404, "File not found %s" % os.path.join(*sourcesplit))
             return None
 
@@ -247,6 +248,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def handle_build(self, pathparts, query):
         content = None
+        contentsize = None
         #Mer:Trunk:Base/standard/i586/_repository?view=cache
         if len(pathparts) >= 3:
             prj_path = gitmds2.lookup_binariespath(pathparts[0])
@@ -326,7 +328,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     contenttype = "text/html"
                     contentmtime = time.time()
         
-        if not content or not contentsize:
+        if content is None or contentsize is None:
             self.send_error(404, "File not found %s" % os.path.join(*pathparts))
             return None
 
@@ -339,13 +341,20 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def handle_lastevents(self, urlsplit, query):
         start = query.get("start", None)
+        if start:
+            start = int(start[0])
+
         qfilters = query.get("filter", [])
         filters = []
         obsname = query.get("obsname", "")
         threading.current_thread().name = "OBS Watcher %s" % obsname
+        if start is None or start > gitmds2.get_next_event() :
+            output = '<events next="' + str(gitmds2.get_next_event()) + '" sync="lost" />\n'
+            contentsize, content = string2stream(output)
+            contenttype = "text/html"
+            contentmtime = time.time()
 
-        if start:
-            start = int(start[0])
+        elif not start is None and start == gitmds2.get_next_event():
             for x in qfilters:
                 spl = x.split('/')
                 if len(spl) == 2:
@@ -353,18 +362,17 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     filters.append((urllib.unquote(spl[0]), urllib.unquote(spl[1]), urllib.unquote(spl[2])))
 
-            log.info("%s: will poll every 10 seconds" % threading.current_thread().name)
+            log.info("%s: will poll every 2 seconds" % threading.current_thread().name)
 
             while start == gitmds2.get_next_event():
-                time.sleep(10)
+                time.sleep(2)
+                #FIXME: also handle case when client disconnects
+                if self.server._BaseServer__is_shut_down.is_set():
+                    self.send_error(503, "Shutting down")
+                    return None
 
+        if not start is None and start < gitmds2.get_next_event():
             contentsize, content = string2stream(gitmds2.get_events_filtered(start, filters))
-            contenttype = "text/html"
-            contentmtime = time.time()
-        else:
-            output = '<events next="' + str(gitmds2.get_next_event()) + '" sync="lost" />\n'
-
-            contentsize, content = string2stream(output)
             contenttype = "text/html"
             contentmtime = time.time()
 
@@ -377,7 +385,9 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     
 class MDSWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
-    pass
+    #daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 50
 
 def refresh_cache():
     gitmds2.generate_mappings("mappingscache.xml", "lastevents.xml")
@@ -388,14 +398,16 @@ def warm_cache():
     _ = gitmds2.get_lastevents()
     log.info("Cache primed")
 
-def termhandler(signum, frame):
+def terminate(httpd):
+    httpd.shutdown()
+
+def sigtermhandler(signum, frame):
     log.info('Got a SIGTERM ...')
-    frame.f_locals["httpd"].shutdown()
+    terminate(frame.f_locals["httpd"])
 
 def sigusr1handler(signum, frame):
     log.info('Got a SIGUSR1 ...')
-    for t in threading.enumerate():
-        print t.name
+    log.info("\n".join([t.name for t in threading.enumerate()]))
 
 if __name__ == "__main__":
 
@@ -418,7 +430,7 @@ if __name__ == "__main__":
         server_thread.name = "MDSWebServer"
         server_thread.start()
         
-        signal.signal(signal.SIGTERM, termhandler)
+        signal.signal(signal.SIGTERM, sigtermhandler)
         signal.signal(signal.SIGUSR1, sigusr1handler)
 
         log.info("%s thread running" % server_thread.name)
@@ -427,7 +439,7 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         log.info("Shutdown requested ...")
-        httpd.shutdown()
+        terminate(httpd)
 
     log.info("Shutdown complete.")
     logging.shutdown()
