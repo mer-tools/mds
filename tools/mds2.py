@@ -144,7 +144,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if urlpath.startswith("/public"):
             urlpath = urlpath.replace("/public", "", 1)
 
-        urlsplit = urlpath.split("/")[2:]
+        urlsplit = [ urllib.unquote(x) for x in urlpath.split("/")[2:]]
         # Begin handling the requests
         # This handles OBS API /public/source/*
         if urlpath.startswith("/source"):
@@ -227,9 +227,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             # Determine what revision is being asked for of the package
             if rev:
                 rev = rev[0]
-            contentsize, contentst = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
-            # Drop contentz, we already know this from contentsize
-            contentz, content = string2stream(contentst)
+            contentsize, content = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
             contenttype = "application/octet-stream"
             contentmtime = time.time()
         # /public/source/PROJECTNAME/PACKAGE/filename

@@ -7,9 +7,6 @@ import csv
 from subprocess import Popen, PIPE
 import logging
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-log = logging.getLogger("mds2.git")
-
 try:
     from lxml import etree
 except ImportError:
@@ -17,6 +14,14 @@ except ImportError:
         import xml.etree.cElementTree as etree
     except ImportError:
         import xml.etree.ElementTree as etree
+
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log = logging.getLogger("mds2.git")
 
 mappingsCacheLock = Lock()
 
@@ -130,11 +135,11 @@ def get_project(projectname):
 
     project["metablob"] = project["prjtree"][project["prjsubdir"] + "/_meta"]
  
-    project["packages"] = etree.fromstring(project["packagesblob"].data_stream.read())
+    project["packages"] = etree.parse(project["packagesblob"].data_stream).getroot()
 
     project["prjconf"] = project["prjconfblob"].data_stream.read()
 
-    project["meta"] = etree.fromstring(project["metablob"].data_stream.read())
+    project["meta"] = etree.parse(project["metablob"].data_stream).getroot()
     
     # We rename the project data inside meta to fit with the obs project name in the request
     for x in project["meta"].iter("project"):
@@ -292,17 +297,17 @@ def get_package_file(project, packagename, filename, getrev):
 </package>
 """ % (project["obsprjname"], packagename, packagename, ifdisabletxt)
         #FIXME: return file_fix_meta(realproject, packagename, fakemeta, ifdisable)
-        return len(fakemeta), fakemeta
+        return len(fakemeta), StringIO(fakemeta)
 
     try:
         commit, rev, srcmd5, tree, git = get_package_tree_from_commit_or_rev(project, packagename, getrev)
         for entry in tree:
             if entry.name == filename:
-                return entry.size, git_cat(git, entry)
+                return entry.size, entry.data_stream
     except TypeError:
         pass
 
-    return 0, ""
+    return 0, StringIO("")
 
 def get_next_event():
         return get_lastevents.ecount + 1
@@ -408,7 +413,7 @@ def initial_lastevents(project, branch, events):
             prjelm.text = subprj
         # packages.xml changes trigger package events
         elif blob.name == "packages.xml":
-            pxml = etree.fromstring(git_cat(branch.repo.working_dir, blob))
+            pxml = etree.parse(blob.data_stream).getroot()
             for pkg in pxml.iter("package"):
                 pkg_name = pkg.attrib['name']
                 log.debug("project %s package %s event" % (subprj, pkg_name))
