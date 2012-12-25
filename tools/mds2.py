@@ -61,11 +61,20 @@ def copyfile(source, outputfile):
     """
     shutil.copyfileobj(source, outputfile)
 
-#FIXME: Implement chunked cpio sender
-def chunkfile(source, outputfile):
-    return True
+def chunk_generator(source, chunksize):
+    while True:
+        data = source.read(chunksize)
+        if not data:
+            break
+        yield data
 
-    
+def chunkfile(source, outputfile, chunksize=8192):
+    for chunk in chunk_generator(source, chunksize):
+        outputfile.write('%X\r\n' % len(chunk))
+        outputfile.write(chunk)
+        outputfile.write('\r\n')
+    outputfile.write('0\r\n\r\n')
+
 # MDSHTTPRequestHandler handles the incoming HTTP requests
 # The basic flow is that GET/POST/HEAD attempts to 
 # run the send_head command, and if that throws an exception,
@@ -117,34 +126,31 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 f.close()
 
     def reply(self, content, contentsize, contenttype, mtime=time.time()):
-        if content is None or contentsize is None:
-            return copyfile, content
-            
-        self.send_response(200)
-        self.send_header("Content-type", contenttype)
-        self.send_header("Content-Length", contentsize)
-        self.send_header("Last-Modified", self.date_time_string(mtime))
-        self.end_headers()
-        if contentsize == "chunked":
-            return chunkfile, content
-        else:
-            return copyfile, content
-
-    def send_head(self):
-        # OBS project names are always of this form:
-        #    projectname:gitreference:subdir
-
         # These are the four variables that must be set for a succesful request as it
         # is what is used to return content to the client, set headers, etc.        
         # If after analyzing the request it is still None
         # it means whatever was requested could not be found
+        # Usually we just copy the returned output to the client
+        # However if contentsize is chunked client will receive chunks until connections is closed
+        func = copyfile
+        if not content is None or not contentsize is None:
+            self.send_response(200)
+            self.send_header("Content-type", contenttype)
+            self.send_header("Last-Modified", self.date_time_string(mtime))
+            if contentsize == "chunked":
+                self.send_header('Transfer-Encoding', 'chunked')
+                func = chunkfile
+            else:
+                self.send_header("Content-Length", contentsize)
+
+            self.end_headers()
+        return func, content
+
+    def send_head(self):
+        # OBS project names are always of this form:
+        #    projectname:gitreference:subdir
         threading.current_thread().name = self.path
 
-        content = None
-        contentsize = 0
-        contentmtime = 0
-        contenttype = None
-        
         # Parse the client's data 
         urlparsed = urlparse.urlparse(self.path)
         urlpath = urlparsed[2]
@@ -293,11 +299,11 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                                 #FIXME: shouldn't an error be raised here
                                 log.info(target + "/" + os.path.basename(x) + ".rpm was not found")
                             binaries = binaries + os.path.basename(x) + ".rpm\n"
-                        #FIXME: Use chunked streaming 
-                        cpiooutput = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
-                        contentsize, content = string2stream(cpiooutput)
-                        #content = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
-                        #contentsize = "chunked"
+                        cpiopipe = subprocess.Popen(["/usr/bin/cpio", "--quiet", "-o", "-H", "newc", "-C", "8192"], bufsize=8192, cwd=target, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                        cpiopipe.stdin.write(binaries)
+                        cpiopipe.stdin.close()
+                        content = cpiopipe.stdout
+                        contentsize = "chunked"
                         contenttype = "application/x-cpio"
 
                     elif view == "names":
@@ -392,8 +398,8 @@ def warm_cache():
     _ = gitmds2.get_lastevents()
     log.info("Cache primed")
 
-def terminate(httpd):
-    httpd.shutdown()
+def terminate(http):
+    http.shutdown()
 
 def sigtermhandler(signum, frame):
     log.info('Got a SIGTERM ...')
