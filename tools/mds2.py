@@ -61,6 +61,11 @@ def copyfile(source, outputfile):
     """
     shutil.copyfileobj(source, outputfile)
 
+#FIXME: Implement chunked cpio sender
+def chunkfile(source, outputfile):
+    return True
+
+    
 # MDSHTTPRequestHandler handles the incoming HTTP requests
 # The basic flow is that GET/POST/HEAD attempts to 
 # run the send_head command, and if that throws an exception,
@@ -76,14 +81,14 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         """Serve a GET request."""
         f = None
         try:
-            f = self.send_head()
+            func, f = self.send_head()
         except: 
             self.send_response(500)
             log.warn("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
         if f:
-            copyfile(f, self.wfile)
+            func(f, self.wfile)
             if hasattr(f, "close"):
                 f.close()
 
@@ -91,9 +96,8 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         """Serve a HEAD request."""
         f = None
         try:
-            f = self.send_head()
+            func, f = self.send_head()
         except:
-        
             if f:
                 if hasattr(f, "close"):
                     f.close()
@@ -101,16 +105,30 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def do_POST(self):
         f = None
         try:
-            f = self.send_head()
+            func, f = self.send_head()
         except:
             self.send_response(500)
             log.info("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
         if f:
-            copyfile(f, self.wfile)
+            func(f, self.wfile)
             if hasattr(f, "close"):
                 f.close()
+
+    def reply(self, content, contentsize, contenttype, mtime=time.time()):
+        if content is None or contentsize is None:
+            return copyfile, content
+            
+        self.send_response(200)
+        self.send_header("Content-type", contenttype)
+        self.send_header("Content-Length", contentsize)
+        self.send_header("Last-Modified", self.date_time_string(mtime))
+        self.end_headers()
+        if contentsize == "chunked":
+            return chunkfile, content
+        else:
+            return copyfile, content
 
     def send_head(self):
         # OBS project names are always of this form:
@@ -161,45 +179,59 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def handle_source(self, sourcesplit, query):
         content = None
         contentsize = None
+        contenttype = "text/xml"
+        reply_kwargs  = {}
+
         # Fetch the project description (packages, other meta data, etc) dictionary for the indicated project
         project = gitmds2.get_project(sourcesplit[0])
 
-        if not project:
-            log.info("404: %s" % os.path.join(sourcesplit))
-            self.send_error(404, "File not found")
-            return None
+        if project:
 
-        if len(sourcesplit) == 1:
-        # This handles:
-        # /public/source/PROJECTNAME
-        # - Basically build a XML output that states what packages are contained
-        #   within the project
-            contentsize, content = string2stream(gitmds2.build_project_index(project))
-            contenttype = "text/xml"
-            contentmtime = time.time()
-        elif len(sourcesplit) == 2:
-        # /public/source/PROJECTNAME/_config
-        # /public/source/PROJECTNAME/_meta
-        # /public/source/PROJECTNAME/_pubkey
-        # /public/source/PROJECTNAME/_pattern
-        # /public/source/PROJECTNAME/PACKAGENAME
-            # The project configuration, stored in our project dictionary
-            if sourcesplit[1] == "_config":
-                contentsize, content = string2stream(project["prjconf"])
-                contenttype = "text/plain"
-                contentmtime = time.time()
-            # The project meta, stored in our project dictionary
-            elif sourcesplit[1] == "_meta":
-                contentsize, content = string2stream(etree.tostring(project["meta"], pretty_print=True))
-                contenttype = "text/xml"
-                contentmtime = time.time()
-            #elif sourcesplit[1] == "_pubkey":
-            #FIXME: We don't currently support extracting pubkeys
-            #   content = None
-            #elif sourcesplit[1] == "_pattern":
-            #FIXME: We don't currently support extracting patterns
-            #   content = None
-            else:
+            if len(sourcesplit) == 1:
+            # This handles:
+            # /public/source/PROJECTNAME
+            # - Basically build a XML output that states what packages are contained
+            #   within the project
+                contentsize, content = string2stream(gitmds2.build_project_index(project))
+
+            elif len(sourcesplit) == 2:
+            # /public/source/PROJECTNAME/_config
+            # /public/source/PROJECTNAME/_meta
+            # /public/source/PROJECTNAME/_pubkey
+            # /public/source/PROJECTNAME/_pattern
+            # /public/source/PROJECTNAME/PACKAGENAME
+                # The project configuration, stored in our project dictionary
+                if sourcesplit[1] == "_config":
+                    contentsize, content = string2stream(project["prjconf"])
+                    contenttype = "text/plain"
+
+                # The project meta, stored in our project dictionary
+                elif sourcesplit[1] == "_meta":
+                    contentsize, content = string2stream(etree.tostring(project["meta"], pretty_print=True))
+
+                #elif sourcesplit[1] == "_pubkey":
+                #FIXME: We don't currently support extracting pubkeys
+                #   content = None
+                #elif sourcesplit[1] == "_pattern":
+                #FIXME: We don't currently support extracting patterns
+                #   content = None
+                else:
+                    expand = query.get("expand", None)
+                    rev = query.get("rev", None)
+                    # Determine if the remote OBS wants the expanded package
+                    # for the linked package (we don't really support this, we just
+                    # give packages different names)
+                    if expand:
+                        expand = int(expand[0])
+                    # Determine what revision is being asked for of the package
+                    if rev:
+                        rev = rev[0]
+
+                    # This will return a XML document containing the files of the package at the time of the revision
+                    contentsize, content = string2stream(gitmds2.get_package_index(project, sourcesplit[1], rev))
+
+            # /public/source/PROJECTNAME/PACKAGE/filename
+            elif len(sourcesplit) == 3:
                 expand = query.get("expand", None)
                 rev = query.get("rev", None)
                 # Determine if the remote OBS wants the expanded package
@@ -210,134 +242,107 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 # Determine what revision is being asked for of the package
                 if rev:
                     rev = rev[0]
+                contentsize, content = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
+                contenttype = "application/octet-stream"
+            #else:
+            #   content = None
+            if content is None or contentsize is None:
+                self.send_error(404, "File not found %s" % os.path.join(*sourcesplit))
+        else:
+            log.info("404: %s" % os.path.join(*sourcesplit))
+            self.send_error(404, "Project not found")
 
-                # This will return a XML document containing the files of the package at the time of the revision
-                contentsize, content = string2stream(gitmds2.get_package_index(project, sourcesplit[1], rev))
-                contenttype = "text/xml"
-                contentmtime = time.time()
-
-        elif len(sourcesplit) == 3:
-            expand = query.get("expand", None)
-            rev = query.get("rev", None)
-            # Determine if the remote OBS wants the expanded package
-            # for the linked package (we don't really support this, we just
-            # give packages different names)
-            if expand:
-                expand = int(expand[0])
-            # Determine what revision is being asked for of the package
-            if rev:
-                rev = rev[0]
-            contentsize, content = gitmds2.get_package_file(project, sourcesplit[1], sourcesplit[2], rev)
-            contenttype = "application/octet-stream"
-            contentmtime = time.time()
-        # /public/source/PROJECTNAME/PACKAGE/filename
-        #else:
-        #   content = None
-        if content is None or contentsize is None:
-            self.send_error(404, "File not found %s" % os.path.join(*sourcesplit))
-            return None
-
-        self.send_response(200)
-        self.send_header("Content-type", contenttype)
-        self.send_header("Content-Length", contentsize)
-        self.send_header("Last-Modified", self.date_time_string(contentmtime))
-        self.end_headers()
-        return content
+        return self.reply(content, contentsize, contenttype, **reply_kwargs)
 
     def handle_build(self, pathparts, query):
         content = None
         contentsize = None
+        contenttype = "text/html"
+        reply_kwargs  = {}
+
         #Mer:Trunk:Base/standard/i586/_repository?view=cache
         if len(pathparts) >= 3:
             prj_path = gitmds2.lookup_binariespath(pathparts[0])
-            if not prj_path:
-                log.info("404: %s" % os.path.join(pathparts))
-                self.send_error(404, "File not found")
-                return None
+            if prj_path:
 
-            target = os.path.join(prj_path, pathparts[1], pathparts[2])
-            if not os.path.exists(target):
-                log.info("404: %s" % os.path.join(pathparts))
-                self.send_error(404, "File not found")
-                return None
+                target = os.path.join(prj_path, pathparts[1], pathparts[2])
+                if os.path.exists(target):
 
-            binary = query.get("binary", None)
-            if not isinstance(binary, list):
-                binary = []
+                    binary = query.get("binary", None)
+                    if not isinstance(binary, list):
+                        binary = []
 
-            view = query.get("view", None) 
-            if isinstance(view, list):
-                view = view[0]
+                    view = query.get("view", None) 
+                    if isinstance(view, list):
+                        view = view[0]
+                    else:
+                        view = "names"
+
+                    if view == "cache" or view == "solvstate":
+                        if os.path.isfile(target + "/_repository?view=" + view):
+                            contentsize, contentmtime, content = file2stream(target + "/_repository?view=" + view)
+                        else:
+                            contentsize, contentmtime, content = file2stream("tools/emptyrepositorycache.cpio")
+                        reply_kwargs["mtime"] = contentmtime
+                        contenttype = "application/octet-stream"
+
+                    elif view == "cpio":
+                        binaries = ""
+                        for x in query["binary"]:
+                            if not os.path.isfile(target + "/" + os.path.basename(x) + ".rpm"):
+                                #FIXME: shouldn't an error be raised here
+                                log.info(target + "/" + os.path.basename(x) + ".rpm was not found")
+                            binaries = binaries + os.path.basename(x) + ".rpm\n"
+                        #FIXME: Use chunked streaming 
+                        cpiooutput = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
+                        contentsize, content = string2stream(cpiooutput)
+                        #content = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
+                        #contentsize = "chunked"
+                        contenttype = "application/x-cpio"
+
+                    elif view == "names":
+                        if os.path.isfile(target + "/_repository?view=names"):
+                            doc = etree.parse(target + "/_repository?view=names").getroot()
+                            removables = []
+                            for x in doc.iter("binary"):
+                                if not os.path.splitext(x.attrib["filename"])[0] in binary:
+                                    removables.append(x)
+                            for x in removables:
+                                doc.remove(x)
+                            contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
+                        else:
+                            contentsize, content = string2stream("<binarylist />")
+                    elif view == "binaryversions":
+                        if os.path.isfile(target + "/_repository?view=cache"):
+                            doc = etree.parse(target + "/_repository?view=binaryversions").getroot()
+                            removables = []
+                            for x in doc.iter("binary"):
+                                if not os.path.splitext(x.attrib["name"])[0] in binary:
+                                    removables.append(x)
+                            for x in removables:
+                                doc.remove(x)
+                            contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
+                        else:
+                            contentsize, content = string2stream("<binaryversionlist />")
+
+                    if content is None or contentsize is None:
+                        self.send_error(404, "File not found %s" % os.path.join(*pathparts))
+
+                else:
+                    log.info("404: %s" % os.path.join(*pathparts))
+                    self.send_error(404, "Repository not found")
             else:
-                view = "names"
+                log.info("404: %s" % os.path.join(*pathparts))
+                self.send_error(404, "Project not found")
 
-            if view == "cache" or view == "solvstate":
-                if os.path.isfile(target + "/_repository?view=" + view):
-                    contentsize, contentmtime, content = file2stream(target + "/_repository?view=" + view)
-                    contenttype = "application/octet-stream"
-                else:
-                    contentsize, contentmtime, content = file2stream("tools/emptyrepositorycache.cpio")
-                    contenttype = "application/octet-stream"
-
-            elif view == "cpio":
-                binaries = ""
-                for x in query["binary"]:
-                    if not os.path.isfile(target + "/" + os.path.basename(x) + ".rpm"):
-                        #FIXME: shouldn't an error be raised here
-                        log.info(target + "/" + os.path.basename(x) + ".rpm was not found")
-                    binaries = binaries + os.path.basename(x) + ".rpm\n"
-
-                cpiooutput = subprocess.Popen(["tools/createcpio", target], stdin=subprocess.PIPE, stdout=subprocess.PIPE).communicate(binaries)[0]
-                contentsize, content = string2stream(cpiooutput)
-                contentmtime = time.time()
-                contenttype = "application/x-cpio"
-
-            elif view == "names":
-                if os.path.isfile(target + "/_repository?view=names"):
-                    doc = etree.parse(target + "/_repository?view=names").getroot()
-                    removables = []
-                    for x in doc.iter("binary"):
-                        if not os.path.splitext(x.attrib["filename"])[0] in binary:
-                            removables.append(x)
-                    for x in removables:
-                        doc.remove(x)
-                    contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
-                    contentmtime = time.time()
-                    contenttype = "text/html"
-                else:
-                    contentsize, content = string2stream("<binarylist />")
-                    contenttype = "text/html"
-                    contentmtime = time.time()
-                ##
-            elif view == "binaryversions":
-                if os.path.isfile(target + "/_repository?view=cache"):
-                    doc = etree.parse(target + "/_repository?view=binaryversions").getroot()
-                    removables = []
-                    for x in doc.iter("binary"):
-                        if not os.path.splitext(x.attrib["name"])[0] in binary:
-                            removables.append(x)
-                    for x in removables:
-                        doc.remove(x)
-                    contentsize, content = string2stream(etree.tostring(doc, pretty_print=True))
-                    contentmtime = time.time()
-                    contenttype = "text/html"
-                else:
-                    contentsize, content = string2stream("<binaryversionlist />")
-                    contenttype = "text/html"
-                    contentmtime = time.time()
-        
-        if content is None or contentsize is None:
-            self.send_error(404, "File not found %s" % os.path.join(*pathparts))
-            return None
-
-        self.send_response(200)
-        self.send_header("Content-type", contenttype)
-        self.send_header("Content-Length", contentsize)
-        self.send_header("Last-Modified", self.date_time_string(contentmtime))
-        self.end_headers()
-        return content
+        return self.reply(content, contentsize, contenttype, **reply_kwargs)
 
     def handle_lastevents(self, urlsplit, query):
+        content = None
+        contentsize = None
+        contenttype = "text/html"
+        reply_kwargs  = {}
+
         start = query.get("start", None)
         if start:
             start = int(start[0])
@@ -349,8 +354,6 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if start is None or start > gitmds2.get_next_event() :
             output = '<events next="' + str(gitmds2.get_next_event()) + '" sync="lost" />\n'
             contentsize, content = string2stream(output)
-            contenttype = "text/html"
-            contentmtime = time.time()
 
         elif not start is None and start == gitmds2.get_next_event():
             for x in qfilters:
@@ -364,22 +367,15 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
             while start == gitmds2.get_next_event():
                 time.sleep(2)
-                #FIXME: also handle case when client disconnects
+                #FIXME: also handle case when client disconnects, which so far seems not trivially possible
                 if self.server._BaseServer__is_shut_down.is_set():
                     self.send_error(503, "Shutting down")
-                    return None
+                    start = None
 
         if not start is None and start < gitmds2.get_next_event():
             contentsize, content = string2stream(gitmds2.get_events_filtered(start, filters))
-            contenttype = "text/html"
-            contentmtime = time.time()
 
-        self.send_response(200)
-        self.send_header("Content-type", contenttype)
-        self.send_header("Content-Length", contentsize)
-        self.send_header("Last-Modified", self.date_time_string(contentmtime))
-        self.end_headers()
-        return content
+        return self.reply(content, contentsize, contenttype, **reply_kwargs)
 
     
 class MDSWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
@@ -409,6 +405,7 @@ def sigusr1handler(signum, frame):
 
 def sigusr2handler(signum, frame):
     log.info('Got a SIGUSR2, dropping to debugger ...')
+    log.info("Examine each thread's frame using traceback.print_stack on the list returned by sys._current_frames()")
     import pdb
     pdb.set_trace()
 
