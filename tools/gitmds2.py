@@ -90,9 +90,6 @@ def lookup_binariespath(projectname):
     else:
         return None
 
-def git_cat(gitpath, blob):
-    return Popen(["git", "--git-dir=" + gitpath, "cat-file", "blob", blob.hexsha], stdout=PIPE).communicate()[0]   
-
 # Utilized in frontend.
 #
 # This basically finds the right git repository for the project
@@ -296,7 +293,6 @@ def get_package_file(project, packagename, filename, getrev):
   %s
 </package>
 """ % (project["obsprjname"], packagename, packagename, ifdisabletxt)
-        #FIXME: return file_fix_meta(realproject, packagename, fakemeta, ifdisable)
         return len(fakemeta), StringIO(fakemeta)
 
     try:
@@ -432,6 +428,15 @@ def initial_lastevents(project, branch, events):
                 pkgelm.text = pkg_name
         #FIXME: repo events ?
 
+def git_cat_md5sum(gitpath, blob):
+    git_cat = Popen(["git", "--git-dir=" + gitpath, "cat-file", "blob", blob.hexsha], stdout=PIPE)
+    md5sum = Popen(["md5sum"], stdin=git_cat.stdout, stdout=PIPE)
+    # allow git_cat to receive a SIGPIPE if md5sum exits before git_cat
+    git_cat.stdout.close()
+    output = md5sum.communicate()[0]
+    output = output.split("-")[0].strip()
+    return output
+
 def generate_mappings(cachefile, eventsfile):
 
     if os.path.exists(cachefile) and os.path.exists(eventsfile):
@@ -507,11 +512,8 @@ def generate_mappings(cachefile, eventsfile):
                         if blob.name == "_meta" or blob.name == "_attribute":
                             continue
 
-                        #FIXME: is there a smarter way to md5sum hash an object without loading the whole thing in memory ?
-                        st = git_cat(x, blob)
-                        #assert len(st) == entry.size
-                        m = hashlib.md5(st)
-                        entries[blob.path] = m.hexdigest()
+                        md5 = git_cat_md5sum(x, blob)
+                        entries[blob.path] = md5
 
                 sortedkeys = sorted(entries.keys())
                 meta = ""
