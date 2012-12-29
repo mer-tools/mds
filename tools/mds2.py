@@ -95,14 +95,15 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             func, f = self.send_head()
         except: 
-            self.send_response(500)
+            self.send_error(500)
             log.warn("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
-        if f:
-            func(f, self.wfile)
-            if hasattr(f, "close"):
-                f.close()
+        finally:
+            if f:
+                func(f, self.wfile)
+                if hasattr(f, "close"):
+                    f.close()
 
     def do_HEAD(self):
         """Serve a HEAD request."""
@@ -119,14 +120,15 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             func, f = self.send_head()
         except:
-            self.send_response(500)
+            self.send_error(500)
             log.info("500: " + self.path)
             traceback.print_exc(file=sys.stdout)
             self.end_headers()
-        if f:
-            func(f, self.wfile)
-            if hasattr(f, "close"):
-                f.close()
+        finally:
+            if f:
+                func(f, self.wfile)
+                if hasattr(f, "close"):
+                    f.close()
 
     def reply(self, content, contentsize, contenttype, mtime=time.time()):
         # These are the four variables that must be set for a succesful request as it
@@ -401,7 +403,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             prjmap = gitmds2.get_mappings().xpath("//mapping[@project='%s']" % urlsplit[1])
             if prjmap:
                 repos_path = prjmap[0].attrib.get("binaries", None)
-                packages_path = prjmap[0].attrib.get("path", None)
+                packages_path = prjmap[0].attrib.get("packages-path", None)
                 repos_upstream = prjmap[0].attrib.get("binaries-upstream", None)
                 packages_upstream = prjmap[0].attrib.get("packages-upstream", None)
 
@@ -412,10 +414,9 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 elif urlsplit[0] == "repo" and repos_upstream and repos_path:
                     repoid = "%s:*:%s" % (urlsplit[1], urlsplit[2])
                     repo_url = os.path.join(repos_upstream, repoid)
-                    repo_path = os.path.join(repos_path, repoid)
 
                     rsync_out = subprocess.check_output(['rsync', '-vaHx', '--delete-after',
-                                                    repo_url, repo_path])
+                                                    repo_url, repos_path])
                 else:
                     log.info("404: %s" % os.path.join(*urlsplit))
                     self.send_error(404, "upstream not set in mappings file for this project")
