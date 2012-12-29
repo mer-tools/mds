@@ -1,6 +1,4 @@
-PLEASEMAKE=packages-git/mappingscache.xml lastevents obs-projects/Core
-
-GIT_URL=http://review.merproject.org/p/mer/project-core
+PLEASEMAKE=fetchlatestrepo updatepackages
 
 all: $(PLEASEMAKE)
 
@@ -9,30 +7,16 @@ fetchlatestrepo:
 	rsync -aHx --verbose rsync://releases.merproject.org/mer-releases/obs-repos/Core:*:`cat obs-repos/latest.release` obs-repos
 	rsync -aHx --verbose rsync://releases.merproject.org/mer-releases/obs-repos/Core:*:latest obs-repos
 
+fetchnextrepo:
+	rsync -aHx --verbose rsync://releases.merproject.org/mer-releases/obs-repos/next.release obs-repos/next.release
+	rsync -aHx --verbose rsync://releases.merproject.org/mer-releases/obs-repos/Core:*:`cat obs-repos/next.release` obs-repos
+	rm obs-repos/Core:*:next
+	for nr in obs-repos/Core:*:`cat obs-repos/next.release`; do ln -s $$nr `dirname $$nr`/next
+
 updatepackages:
 	rsync -aHx --verbose --exclude=repos.lst --exclude=mappingscache.xml --exclude=.keep --delete-after rsync://releases.merproject.org/mer-releases/packages-git/ packages-git
 
-updatecore:
-	cd obs-projects/Core; git pull
-
-updatesstorm:
-	python tools/updatesstorm.py
-
-update: fetchlatestrepo updatepackages all updatecore updatesstorm 
+update: fetchlatestrepo fetchnextrepo updatepackages
 	
-obs-projects/Core:
-	git clone $(GIT_URL) obs-projects/Core
-
-packages-git/repos.lst:: updatepackages
-	find packages-git/mer-core packages-git/mer-crosshelpers -mindepth 1 -maxdepth 1 -type d -printf "%p\n" | sort > packages-git/repos.lst
-
-packages-git/mappingscache.xml: packages-git/repos.lst
-	if [ ! -e $@ ]; then echo '<mappings />' > $@ ; fi
-	python tools/makemappings.py $^ $@
-	
-lastevents:
-	touch lastevents
-	sh tools/addevent initial na na 
-
 clean:
 	rm -f $(PLEASEMAKE)
