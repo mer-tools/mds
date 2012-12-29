@@ -90,6 +90,19 @@ def lookup_binariespath(projectname):
     else:
         return None
 
+def deref(project):
+    # dereference latest and next to correct tags
+    # next tags are of the form 0.YYYYMMDD.0.SEQ
+    # latest tags are of the form 0.YYYYMMDD.SEQ
+    ref = project["prjgitbranch"]
+    tags = [tag.name for tag in project["prjgit"].tags]
+    # git tags are in ascending order by default
+    tags.sort(reverse=True)
+    for tag in tags:
+        if (project["prjgitbranch"] == "next" and len(tag.split(".")) == 4) \
+        or (project["prjgitbranch"] == "latest" and len(tag.split(".")) == 3):
+            project["prjgitbranch"] = tag
+    
 # Utilized in frontend.
 #
 # This basically finds the right git repository for the project
@@ -106,23 +119,23 @@ def get_project(projectname):
     breakdown = projectname.split(':')
     if len(breakdown) != 3:
         return None
-     
+
     project["obsprjname"] = projectname 
     project["prjname"] = breakdown[0]
     project["prjsubdir"] = breakdown[1]
     project["prjgitbranch"] = breakdown[2]
 
-    found = False
-    for x in get_mappings().iter("mapping"):
-        if x.attrib["project"] == project["prjname"]:
-            found = True
-            project["prjgitrepo"] = x.attrib["path"]
-            break
+    prjmap = get_mappings().xpath("//mapping[@project='%s']" % project["prjname"])
 
-    if not found:
-        return None
+    if not prjmap:
+       return None
+
+    project["prjgitrepo"] = prjmap[0].attrib['path']
 
     project["prjgit"] = git.Repo(project["prjgitrepo"], odbt=git.GitDB)
+
+    if project["prjgitbranch"] in ["latest", "next"]:
+        project["prjgitbranch"] = deref(project)
     
     project["prjtree"] = project["prjgit"].tree(project["prjgitbranch"])
     
@@ -230,7 +243,6 @@ def get_package_index(project, packagename, getrev):
         getrev = get_latest_commit(project, packagename)
 
     try:
-        #commit, rev, srcmd5, tree, git = get_package_tree_from_commit_or_rev(project, packagename, getrev)
         commit, rev, srcmd5, tree, _ = get_package_tree_from_commit_or_rev(project, packagename, getrev)
     except TypeError:
         return ""
@@ -240,9 +252,6 @@ def get_package_index(project, packagename, getrev):
     indexdoc = etree.Element('directory', name = packagename, srcmd5 = srcmd5, rev = rev, vrev = vrev)
     doc = etree.ElementTree(indexdoc)
 
-    # if projectpath == "obs-projects/Core-armv7l":
-    #   indexdoc.childNodes[0].setAttribute("rev", str(int(rev) + 1))
-    # else:
     for entry in tree:
         if entry.name == "_meta" or entry.name == "_attribute":
             continue
@@ -523,10 +532,9 @@ def generate_mappings(cachefile, eventsfile):
                     meta += y
                     meta += "\n"
 
-                m = hashlib.md5(meta)
                 mapelm = etree.SubElement(repoelement, "map", branch = branch.name,
                                                               commit = cm.hexsha,
-                                                              srcmd5 = m.hexdigest(),
+                                                              srcmd5 = hashlib.md5(meta).hexdigest(),
                                                               rev = str(toprev-rev))
                 for y in sortedkeys:
                     entryelm = etree.SubElement(mapelm, "entry", name = y,
