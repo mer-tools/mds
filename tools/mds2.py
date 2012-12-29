@@ -13,6 +13,7 @@ import subprocess
 import threading
 import signal
 import logging
+import argparse
 
 try:
     from lxml import etree
@@ -401,6 +402,10 @@ def warm_cache():
 def terminate(http):
     http.shutdown()
 
+def sighuphandler(signum, frame):
+    log.info('Got a SIGHUP ...')
+    refresh_cache()
+
 def sigtermhandler(signum, frame):
     log.info('Got a SIGTERM ...')
     terminate(frame.f_locals["httpd"])
@@ -415,12 +420,28 @@ def sigusr2handler(signum, frame):
     import pdb
     pdb.set_trace()
 
+def parseArgs():
+    parser = argparse.ArgumentParser(description='MDS2 usage.')
+    parser.add_argument('port', metavar='PORT', type=int,
+                   help='an integer for the http port to listen on')
+    parser.add_argument('--debug', '-d', dest='debug', action='store_const', default=logging.INFO,
+                   const=logging.DEBUG, help='run in debug and verbose log mode')
+    parser.add_argument('--version', '-v', action='version', version='%(prog)s ' + __version__)
+    return parser.parse_args()
+
 if __name__ == "__main__":
 
-    PORT = int(sys.argv[1])
-    httpd = MDSWebServer(("0.0.0.0", PORT), MDSHTTPRequestHandler)
+    args = parseArgs()
+
+    try:
+        from setproctitle import setproctitle
+        setproctitle("MDS server %s" % args.port)
+    except ImportError:
+        pass
+
+    httpd = MDSWebServer(("0.0.0.0", args.port), MDSHTTPRequestHandler)
     log = logging.getLogger("mds2")
-    log.setLevel(logging.INFO)
+    log.setLevel(args.debug)
 
     try:
         # refresh caches
@@ -438,10 +459,11 @@ if __name__ == "__main__":
 
         # install signal handlers
         signal.signal(signal.SIGTERM, sigtermhandler)
+        signal.signal(signal.SIGHUP, sighuphandler)
         signal.signal(signal.SIGUSR1, sigusr1handler)
         signal.signal(signal.SIGUSR2, sigusr2handler)
 
-        log.info("%s thread running" % server_thread.name)
+        log.info("%s thread running with pid %s" % (server_thread.name, os.getpid()))
         while server_thread.is_alive():
             time.sleep(2)
 
