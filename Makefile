@@ -1,4 +1,4 @@
-PLEASEMAKE=fetchlatestrepo updatepackages
+PLEASEMAKE=fetchlatestrepo fetchnextrepo updatepackages
 
 all: $(PLEASEMAKE)
 
@@ -17,6 +17,3 @@ updatepackages:
 	rsync -aHx --verbose --exclude=repos.lst --exclude=mappingscache.xml --exclude=.keep --delete-after rsync://releases.merproject.org/mer-releases/packages-git/ packages-git
 
 update: fetchlatestrepo fetchnextrepo updatepackages
-	
-clean:
-	rm -f $(PLEASEMAKE)

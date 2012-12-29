@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 __version__ = "2.0"
 
 import os, sys
@@ -179,6 +181,9 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             return self.handle_build(urlsplit, query)
         elif urlpath.startswith("/lastevents"):
             return self.handle_lastevents(urlsplit, query)
+        elif urlpath.startswith("/update"):
+            # private api for getting updates from upstream
+            return self.handle_update(urlsplit, query)
         else:
             #unsupported
             raise RuntimeError("unsupported API %s" % self.path)
@@ -384,6 +389,51 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return self.reply(content, contentsize, contenttype, **reply_kwargs)
 
+    def handle_update(self, urlsplit, query):
+    # update/packages/Core
+    # update/repo/Core/[latest|next|0.20121225.1]
+        rsync_out = None
+        content = None
+        contentsize = None
+        contenttype = "text/html"
+        reply_kwargs  = {}
+        if len(urlsplit) >= 2 and urlsplit[0] in ["packages", "repo"]:
+            prjmap = gitmds2.get_mappings().xpath("//mapping[@project='%s']" % urlsplit[1])
+            if prjmap:
+                repos_path = prjmap[0].attrib.get("binaries", None)
+                packages_path = prjmap[0].attrib.get("path", None)
+                repos_upstream = prjmap[0].attrib.get("binaries-upstream", None)
+                packages_upstream = prjmap[0].attrib.get("packages-upstream", None)
+
+                if urlsplit[0] == "packages" and packages_upstream and packages_path:
+                    rsync_out = subprocess.check_output(['rsync', '-vaHx', '--delete-after',
+                                                        packages_upstream, packages_path])
+
+                elif urlsplit[0] == "repo" and repos_upstream and repos_path:
+                    repoid = "%s:*:%s" % (urlsplit[1], urlsplit[2])
+                    repo_url = os.path.join(repos_upstream, repoid)
+                    repo_path = os.path.join(repos_path, repoid)
+
+                    rsync_out = subprocess.check_output(['rsync', '-vaHx', '--delete-after',
+                                                    repo_url, repo_path])
+                else:
+                    log.info("404: %s" % os.path.join(*urlsplit))
+                    self.send_error(404, "upstream not set in mappings file for this project")
+            else:
+                log.info("404: %s" % os.path.join(*urlsplit))
+                self.send_error(404, "project not found")
+        else:
+            log.info("500: %s" % os.path.join(*urlsplit))
+            self.send_error(500, "Request not understood")
+
+        if rsync_out:
+            refresh_cache()
+            contentsize, content = string2stream(rsync_out)
+        else:
+            self.send_error(500, "Something went wrong")
+            
+        return self.reply(content, contentsize, contenttype, **reply_kwargs)
+
     
 class MDSWebServer(SocketServer.ThreadingMixIn, BaseHTTPServer.HTTPServer):
     #daemon_threads = True
@@ -432,13 +482,6 @@ def parseArgs():
 if __name__ == "__main__":
 
     args = parseArgs()
-
-    try:
-        from setproctitle import setproctitle
-        setproctitle("MDS server %s" % args.port)
-    except ImportError:
-        pass
-
     httpd = MDSWebServer(("0.0.0.0", args.port), MDSHTTPRequestHandler)
     log = logging.getLogger("mds2")
     log.setLevel(args.debug)
