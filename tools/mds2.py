@@ -408,14 +408,14 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 packages_upstream = prjmap[0].attrib.get("packages-upstream", None)
 
                 if urlsplit[0] == "packages" and packages_upstream and packages_path:
-                    rsync_out = subprocess.check_output(['rsync', '-vaHx', '--delete-after',
+                    rsync_out = subprocess.check_output(['rsync', '-vrltOHx', '--delete-after',
                                                         packages_upstream, packages_path])
 
                 elif urlsplit[0] == "repo" and repos_upstream and repos_path:
                     repoid = "%s:*:%s" % (urlsplit[1], urlsplit[2])
                     repo_url = os.path.join(repos_upstream, repoid)
 
-                    rsync_out = subprocess.check_output(['rsync', '-vaHx', '--delete-after',
+                    rsync_out = subprocess.check_output(['rsync', '-vrltOHx', '--delete-after',
                                                     repo_url, repos_path])
                 else:
                     log.info("404: %s" % os.path.join(*urlsplit))
