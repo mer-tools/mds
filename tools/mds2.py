@@ -276,7 +276,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
         #Mer:Trunk:Base/standard/i586/_repository?view=cache
         if len(pathparts) >= 3:
-            prj_path = gitmds2.lookup_binariespath(pathparts[0])
+            prj_path = gitmds2.get_project(pathparts[0])["binaries"]
             if prj_path:
 
                 target = os.path.join(prj_path, pathparts[1], pathparts[2])

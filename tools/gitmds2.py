@@ -80,32 +80,23 @@ def get_lastevents():
         get_lastevents.ecount = len(get_lastevents.mcache.xpath("//event"))
     return get_lastevents.mcache
 
-def lookup_binariespath(projectname):
-    binaries_path = None
-    for x in get_mappings().iter("mapping"):
-        #if x.attrib["project"] == projectname:
-        binaries_path = os.path.join(x.attrib["binaries"], projectname)
-    if os.path.exists(binaries_path):
-        return binaries_path
-    else:
-        return None
-
 def deref(project):
     # dereference latest and next to correct tags
-    # next tags are of the form 0.YYYYMMDD.0.SEQ
+    # next tags are of the form 0.YYYYMMDD.0.SEQ or 0.YYYYMMDD.0.0.SEQ
     # latest tags are of the form 0.YYYYMMDD.SEQ
     ref = project["prjgitbranch"]
     tags = [tag.name for tag in project["prjgit"].tags]
     # git tags are in ascending order by default
     tags.sort(reverse=True)
     for tag in tags:
-        if (project["prjgitbranch"] == "next" and len(tag.split(".")) == 4) \
+        if (project["prjgitbranch"] == "next" and len(tag.split(".")) == 5) \
+        or (project["prjgitbranch"] == "next" and len(tag.split(".")) == 4) \
         or (project["prjgitbranch"] == "latest" and len(tag.split(".")) == 3):
             project["prjgitbranch"] = tag
     
 # Utilized in frontend.
 #
-# This basically finds the right git repository for the project
+# This basically finds the right git repository and repository for the project
 # Each project is of the form PROJECTNAME:SUBDIR:GITREF
 # for example: Core:i586:master means find metadata underneath i586/ directory in master branch in the 
 # git project that project name "Core" points to in mappings.xml (MDS2 project config file)
@@ -135,7 +126,7 @@ def get_project(projectname):
     project["prjgit"] = git.Repo(project["prjgitrepo"], odbt=git.GitDB)
 
     if project["prjgitbranch"] in ["latest", "next"]:
-        project["prjgitbranch"] = deref(project)
+        deref(project)
     
     project["prjtree"] = project["prjgit"].tree(project["prjgitbranch"])
     
@@ -151,9 +142,17 @@ def get_project(projectname):
 
     project["meta"] = etree.parse(project["metablob"].data_stream).getroot()
     
+    project["binaries"] = None
+    binaries_path = os.path.join(prjmap[0].attrib["binaries"], "%s:%s:%s" % (project["prjname"], project["prjsubdir"], project["prjgitbranch"]))
+
+    if os.path.exists(binaries_path):
+        project["binaries"] = binaries_path
+
     # We rename the project data inside meta to fit with the obs project name in the request
     for x in project["meta"].iter("project"):
         x.set("name", project["obsprjname"])
+        for title in x.iter("title"):
+            title.text = project["prjgitbranch"]
 
     return project
 
