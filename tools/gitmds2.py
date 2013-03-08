@@ -154,6 +154,19 @@ def get_project(projectname):
         for title in x.iter("title"):
             title.text = project["prjgitbranch"]
 
+    x = project["meta"].find("build")
+    if not x is None:
+        for y in project["packages"].iter("package"):
+            if y.attrib.get("enablei586"):
+                a = etree.SubElement(x, "enable")
+                a.set("package", "".join(y.attrib["name"]))
+                a.set("arch", "i586")
+        for y in project["packages"].iter("link"):
+            if y.attrib.get("enablei586"):
+                a = etree.SubElement(x, "enable")
+                a.set("package", "".join(y.attrib["to"]))
+                a.set("arch", "i586")
+
     return project
 
 # Utilized in frontend

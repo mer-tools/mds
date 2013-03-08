@@ -307,7 +307,7 @@ class MDSHTTPRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                                 #FIXME: shouldn't an error be raised here
                                 log.info(target + "/" + os.path.basename(x) + ".rpm was not found")
                             binaries = binaries + os.path.basename(x) + ".rpm\n"
-                        cpiopipe = subprocess.Popen(["/usr/bin/cpio", "--quiet", "-o", "-H", "newc", "-C", "8192"], bufsize=8192, cwd=target, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                        cpiopipe = subprocess.Popen(["cpio", "--quiet", "-o", "-H", "newc", "-C", "8192"], bufsize=8192, cwd=target, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
                         cpiopipe.stdin.write(binaries)
                         cpiopipe.stdin.close()
                         content = cpiopipe.stdout
