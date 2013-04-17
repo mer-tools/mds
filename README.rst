@@ -19,7 +19,7 @@ Setup
 * Create a user called mer (system specific)
 * Install requirements ::
 
-    zypper install python-pip 
+    zypper install zlib-devel python-devel gcc gcc-g++ python-pip 
     pip install gitdb
     pip install GitPython
 
