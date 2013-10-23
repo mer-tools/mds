@@ -2,6 +2,7 @@ from threading import Lock
 import git
 import hashlib
 import os
+import time
 import glob
 import csv
 from subprocess import Popen, PIPE
@@ -130,13 +131,17 @@ def get_project(projectname):
     
     project["prjtree"] = project["prjgit"].tree(project["prjgitbranch"])
     
-    project["packagesblob"] = project["prjtree"][project["prjsubdir"] + "/packages.xml"]
-
+    try:
+       project["packagesblob"] = project["prjtree"][project["prjsubdir"] + "/packages.xml"]
+    except KeyError:
+       pass
+	
     project["prjconfblob"] = project["prjtree"][project["prjsubdir"] + "/_config"]
 
     project["metablob"] = project["prjtree"][project["prjsubdir"] + "/_meta"]
  
-    project["packages"] = etree.parse(project["packagesblob"].data_stream).getroot()
+    if project.has_key("packagesblob"):
+        project["packages"] = etree.parse(project["packagesblob"].data_stream).getroot()
 
     project["prjconf"] = project["prjconfblob"].data_stream.read()
 
@@ -147,26 +152,26 @@ def get_project(projectname):
 
     if os.path.exists(binaries_path):
         project["binaries"] = binaries_path
-
-    # We rename the project data inside meta to fit with the obs project name in the request
-    for x in project["meta"].iter("project"):
-        x.set("name", project["obsprjname"])
-        for title in x.iter("title"):
-            title.text = project["prjgitbranch"]
-
-    x = project["meta"].find("build")
-    if not x is None:
-        for y in project["packages"].iter("package"):
-            if y.attrib.get("enablei586"):
-                a = etree.SubElement(x, "enable")
-                a.set("package", "".join(y.attrib["name"]))
-                a.set("arch", "i586")
-        for y in project["packages"].iter("link"):
-            if y.attrib.get("enablei586"):
-                a = etree.SubElement(x, "enable")
-                a.set("package", "".join(y.attrib["to"]))
-                a.set("arch", "i586")
-
+    
+    if project.has_key("packagesblob"):
+	    # We rename the project data inside meta to fit with the obs project name in the request
+	    for x in project["meta"].iter("project"):
+	        x.set("name", project["obsprjname"])
+	        for title in x.iter("title"):
+	            title.text = project["prjgitbranch"]
+    
+	    x = project["meta"].find("build")
+	    if not x is None:
+	       for y in project["packages"].iter("package"):
+	         if y.attrib.get("enablei586"):
+	            a = etree.SubElement(x, "enable")
+	            a.set("package", "".join(y.attrib["name"]))
+	            a.set("arch", "i586")
+	       for y in project["packages"].iter("link"):
+	         if y.attrib.get("enablei586"):
+	            a = etree.SubElement(x, "enable")
+	            a.set("package", "".join(y.attrib["to"]))
+       	       a.set("arch", "i586")
     return project
 
 # Utilized in frontend
@@ -177,12 +182,32 @@ def get_project(projectname):
 def build_project_index(project):
     indexdoc = etree.Element('directory')
     doc = etree.ElementTree(indexdoc)
-    packagesdoc = project["packages"]
-    for x in packagesdoc.iter("package"):
-        entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["name"])
-    for x in packagesdoc.iter("link"):
-        entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["to"])
+
+    if not project.has_key("packages"):
+        print project["prjtree"][project["prjsubdir"]].trees
+        for x in project["prjtree"][project["prjsubdir"]].trees:
+            entryelm = etree.SubElement(indexdoc, "entry", name = x.name)
+    else:
+        packagesdoc = project["packages"]
+        for x in packagesdoc.iter("package"):
+           entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["name"])
+        for x in packagesdoc.iter("link"):
+           entryelm = etree.SubElement(indexdoc, "entry", name = x.attrib["to"])
     return etree.tostring(doc, pretty_print=True)
+
+def get_package_srcmd5_service(project, packagename):
+	blob = project["prjtree"][project["prjsubdir"] + "/" + packagename + "/_service"]
+	md5 = git_cat_md5sum(project["prjgitrepo"], blob)
+        meta = ""
+        meta += md5
+        meta += "  "
+        meta += "_service"
+        meta += "\n"
+	
+	srcmd5 = hashlib.md5(meta).hexdigest()
+	
+	return blob.size, md5, srcmd5
+
 
 def get_latest_commit(project, packagename):
     packagesdoc = project["packages"]
@@ -245,6 +270,19 @@ def get_package_tree_from_commit_or_rev(project, packagename, commit):
 
 
 def get_package_index(project, packagename, getrev):
+    if not project.has_key("packages"):
+      pkgsize, pkgmd5, srcmd5 = get_package_srcmd5_service(project, packagename)
+      indexdoc = etree.Element('directory', name = packagename, srcmd5 = srcmd5, rev = "1", vrev = "1")
+      doc = etree.ElementTree(indexdoc)
+
+      etree.SubElement(indexdoc, "entry", name = "_service",
+                                         size = str(pkgsize),
+                                         mtime = str(int(time.time())),
+                                         md5 = pkgmd5)
+      return etree.tostring(doc, pretty_print=True)
+
+
+
     if getrev is None:
         getrev = "latest"
     if getrev == "upload":
@@ -289,8 +327,25 @@ def get_if_disable(project, packagename):
         return True
     return False
 
-
 def get_package_file(project, packagename, filename, getrev):
+    if not project.has_key("packages"):
+	    # Make fake _meta file
+            if filename == "_meta":
+	        fakemeta = """<package project="%s" name="%s">
+  <title>%s</title>
+  <description>Description
+</description>
+  <url>http://www.merproject.org</url>
+</package>
+""" % (project["obsprjname"], packagename, packagename)
+
+                return len(fakemeta), StringIO(fakemeta)
+            elif filename == "_service":
+                blob = project["prjtree"][project["prjsubdir"] + "/" + packagename + "/_service"]
+                return blob.size, blob.data_stream
+            else:
+                return 0, StringIO("")
+
     if getrev is None:
         getrev = "latest"
     if getrev == "upload":
@@ -316,6 +371,7 @@ def get_package_file(project, packagename, filename, getrev):
 """ % (project["obsprjname"], packagename, packagename, ifdisabletxt)
         return len(fakemeta), StringIO(fakemeta)
 
+    
     try:
         commit, rev, srcmd5, tree, git = get_package_tree_from_commit_or_rev(project, packagename, getrev)
         for entry in tree:
@@ -560,4 +616,5 @@ def generate_mappings(cachefile, eventsfile):
     mapdoc.write(cachefile, pretty_print=True)
     eventdoc.write(eventsfile, pretty_print=True)
     log.info("%s now up to date" % cachefile)
+
 
